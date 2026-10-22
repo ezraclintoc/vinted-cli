@@ -1,0 +1,19 @@
+[package]
+name = "vinted-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Async Rust client for Vinted's unofficial marketplace API (search, items, sellers)."
+keywords = ["vinted", "api", "scraper", "marketplace"]
+categories = ["api-bindings"]
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+tokio.workspace = true
+futures.workspace = true
