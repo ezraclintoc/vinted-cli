@@ -4,9 +4,9 @@
 //! an anonymous session, transparently refreshing it on auth failures.
 
 use crate::error::{Error, Result};
-use crate::site::Site;
-use crate::models::{SearchFilter, SearchResponse, SellerInfo, User};
+use crate::models::{Item, SearchFilter, SearchResponse, SellerInfo, User};
 use crate::session::Session;
+use crate::site::Site;
 use reqwest::Client;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -75,7 +75,7 @@ impl VintedClient {
             let (status, resp) = op(headers).await?;
 
             match status {
-                200 => return Ok(parse_ok::<T>(resp).await?),
+                200 => return parse_ok::<T>(resp).await,
                 401 | 403 if !refreshed => {
                     refreshed = true;
                     self.invalidate_session().await;
@@ -91,7 +91,11 @@ impl VintedClient {
                         Ok(_) => String::new(),
                         Err(e) => format!("{e} :: raw: {head}"),
                     };
-                    return Err(Error::Api { status: code, url, body });
+                    return Err(Error::Api {
+                        status: code,
+                        url,
+                        body,
+                    });
                 }
             }
         }
@@ -126,6 +130,56 @@ impl VintedClient {
             Ok((status, resp))
         })
         .await
+    }
+
+    /// Fetch up to `pages` consecutive pages, merging and de-duplicating items.
+    ///
+    /// Stops early when the API reports no further pages or returns an empty
+    /// page. A short pause between requests keeps us polite with upstream.
+    pub async fn search_pages(&self, filter: &SearchFilter, pages: u32) -> Result<MergedSearch> {
+        let mut all_items: Vec<Item> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut pages_fetched = 0u32;
+        let mut total_entries = 0i64;
+        let mut last_pagination: Option<crate::models::Pagination> = None;
+
+        for page in 1..=pages.max(1) {
+            let mut page_filter = filter.clone();
+            page_filter.page = Some(page);
+            let resp = self.search(&page_filter).await?;
+
+            if let Some(ref pagination) = resp.pagination {
+                total_entries = pagination.total_entries;
+                last_pagination = Some(pagination.clone());
+            }
+
+            let empty = resp.items.is_empty();
+            for item in resp.items {
+                if seen.insert(item.id) {
+                    all_items.push(item);
+                }
+            }
+            pages_fetched += 1;
+
+            if empty
+                || last_pagination
+                    .as_ref()
+                    .map(|p| page >= p.total_pages)
+                    .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+
+        Ok(MergedSearch {
+            response: SearchResponse {
+                items: all_items,
+                pagination: last_pagination,
+            },
+            pages_fetched,
+            total_entries,
+        })
     }
 
     /// Fetch a seller/user profile including review statistics.
@@ -168,14 +222,23 @@ impl VintedClient {
     }
 }
 
-/// Wrapper around the user endpoint payload.
+/// Result of [`VintedClient::search_pages`].
+#[derive(Debug, Clone)]
+pub struct MergedSearch {
+    /// Merged, de-duplicated items across fetched pages.
+    pub response: SearchResponse,
+    /// How many pages were actually fetched.
+    pub pages_fetched: u32,
+    /// Total items the server reports (across all pages).
+    pub total_entries: i64,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct UserPayload {
     #[serde(default)]
     user: Option<User>,
-}async fn parse_ok<T: serde::de::DeserializeOwned>(
-    resp: reqwest::Response,
-) -> Result<T> {
+}
+async fn parse_ok<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
     let bytes = resp.bytes().await.map_err(Error::Http)?;
     match serde_json::from_slice::<T>(&bytes) {
         Ok(v) => Ok(v),

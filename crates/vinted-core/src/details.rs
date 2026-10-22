@@ -5,8 +5,8 @@
 //! carries the useful metadata in OpenGraph `<head>` tags; we parse those.
 
 use crate::error::Result;
-use crate::site::Site;
 use crate::session::Session;
+use crate::site::Site;
 use reqwest::Client;
 use serde::Serialize;
 
@@ -98,7 +98,10 @@ async fn document_get(http: &Client, site: &Site, session: &Session, url: &str) 
     put("Sec-Fetch-Site", "none".into());
     put("Sec-Fetch-User", "?1".into());
     put("Referer", base);
-    put("Cookie", format!("access_token_web={}", session.access_token));
+    put(
+        "Cookie",
+        format!("access_token_web={}", session.access_token),
+    );
     if let Some(anon) = &session.anon_id {
         put("X-Anon-Id", anon.clone());
     }
@@ -116,20 +119,18 @@ async fn document_get(http: &Client, site: &Site, session: &Session, url: &str) 
         });
     }
     let html = resp.text().await?;
-    if html.contains("og:title") {
-        Ok(html)
-    } else {
-        Ok(html)
-    }
+    Ok(html)
 }
 
-fn meta_tag<'a>(html: &'a str, property: &str) -> Option<String> {
+fn meta_tag(html: &str, property: &str) -> Option<String> {
     // Scan every `<meta …>` tag and pick the one whose `property`/`name`
     // attribute matches, in either attribute order.
     let mut from = 0;
     while let Some(start) = html[from..].find("<meta") {
         let start = from + start;
-        let Some(gt) = html[start..].find('>') else { break };
+        let Some(gt) = html[start..].find('>') else {
+            break;
+        };
         let tag = &html[start..=start + gt];
         from = start + 5;
 
@@ -138,11 +139,17 @@ fn meta_tag<'a>(html: &'a str, property: &str) -> Option<String> {
         if !matches {
             continue;
         }
-        let Some(cpos) = tag.find("content=") else { continue };
+        let Some(cpos) = tag.find("content=") else {
+            continue;
+        };
         let after = &tag[cpos + 8..];
-        let Some(quote) = after.chars().next() else { continue };
+        let Some(quote) = after.chars().next() else {
+            continue;
+        };
         if quote == '"' || quote == '\'' {
-            let Some(end) = after[1..].find(quote) else { continue };
+            let Some(end) = after[1..].find(quote) else {
+                continue;
+            };
             if let Some(val) = json_unescape(&after[1..end + 1]) {
                 return Some(val);
             }
@@ -162,13 +169,16 @@ fn json_unescape(s: &str) -> Option<String> {
 
 fn og_to_detail(id: i64, url: &str, html: &str) -> ItemDetail {
     let title = meta_tag(html, "og:title")
-        .map(|t| t.trim_end_matches(|c: char| c == ' ')
-            .trim_end_matches("| Vinted")
-            .trim_end()
-            .to_string())
+        .map(|t| {
+            t.trim_end_matches(' ')
+                .trim_end_matches("| Vinted")
+                .trim_end()
+                .to_string()
+        })
         .unwrap_or_default();
     let (price, currency) = schema_price(html);
-    let detail = ItemDetail {
+    
+    ItemDetail {
         id,
         title,
         description: meta_tag(html, "og:description"),
@@ -181,8 +191,7 @@ fn og_to_detail(id: i64, url: &str, html: &str) -> ItemDetail {
         condition: micro_data(html, "status"),
         color: micro_data(html, "color"),
         material: micro_data(html, "material"),
-    };
-    detail
+    }
 }
 
 /// Extract `"price":X` + `"priceCurrency":"YYY"` from the schema.org JSON-LD
@@ -193,7 +202,7 @@ fn schema_price(html: &str) -> (Option<String>, Option<String>) {
     (price, currency)
 }
 
-fn json_scalar_after<'a>(html: &'a str, key: &str) -> Option<String> {
+fn json_scalar_after(html: &str, key: &str) -> Option<String> {
     let at = html.find(key)?;
     let rest = &html[at + key.len()..];
     let first = rest.chars().next()?;
@@ -218,10 +227,12 @@ fn micro_data(html: &str, name: &str) -> Option<String> {
     let rest = &html[at..];
     // Take a small window to avoid scanning the whole document.
     let window = &rest[..rest.len().min(2000)];
-    let mut segs = window.split('<');
+    let segs = window.split('<');
     let mut value = String::new();
-    while let Some(seg) = segs.next() {
-        let Some(content) = seg.split_once('>') else { continue };
+    for seg in segs {
+        let Some(content) = seg.split_once('>') else {
+            continue;
+        };
         if content.0.starts_with("script") {
             break;
         }
@@ -254,7 +265,8 @@ mod tests {
 
     #[test]
     fn parses_schema_price_and_microdata() {
-        let html = "</script>\"priceCurrency\":\"USD\",\"price\":9,\"availability\"</script>".to_string()
+        let html = "</script>\"priceCurrency\":\"USD\",\"price\":9,\"availability\"</script>"
+            .to_string()
             + "<div itemProp=\"size\"><span class=\"x\">S / US 4-6</span></div>"
             + "<div itemProp=\"status\"><span class=\"b\">Very good</span></div>";
         let d = og_to_detail(1, "https://x.com/items/1", &html);

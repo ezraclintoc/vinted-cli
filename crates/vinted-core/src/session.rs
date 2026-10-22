@@ -78,11 +78,7 @@ impl Session {
     }
 
     /// Try to refresh an expired token in place.
-    pub async fn refresh(
-        &self,
-        http: &reqwest::Client,
-        site: &Site,
-    ) -> Result<Self> {
+    pub async fn refresh(&self, http: &reqwest::Client, site: &Site) -> Result<Self> {
         let url = format!("{}/auth/token_refresh", site.base_url());
         let resp = http
             .post(&url)
@@ -124,7 +120,11 @@ impl Session {
         let ua = &self.user_agent;
         put(&mut h, "User-Agent", ua.clone());
         put(&mut h, "Accept", "application/json, text/plain, */*".into());
-        put(&mut h, "Accept-Language", format!("{},en;q=0.5", self.locale));
+        put(
+            &mut h,
+            "Accept-Language",
+            format!("{},en;q=0.5", self.locale),
+        );
         put(&mut h, "Accept-Encoding", "gzip, deflate, br, zstd".into());
         put(&mut h, "Cache-Control", "no-cache".into());
         put(&mut h, "Pragma", "no-cache".into());

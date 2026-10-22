@@ -248,11 +248,7 @@ where
 
 impl Price {
     pub fn numeric(&self) -> f64 {
-        self.amount
-            .replace(",", "")
-            .trim()
-            .parse()
-            .unwrap_or(0.0)
+        self.amount.replace(",", "").trim().parse().unwrap_or(0.0)
     }
 }
 

@@ -36,7 +36,20 @@ the box.
 | `--condition` | `new-with-tag`, `new-no-tag`, `very-good`, `good`, `satisfactory` |
 | `--order` | `relevance`, `newest-first`, `price-low-to-high`, `price-high-to-low` |
 | `--page N`, `--limit N` (max 100) | pagination |
-| `--photo` | only items with photos |
+| `--pages N` | fetch N consecutive pages and merge the results (de-duplicated, polite 400 ms pauses) |
+
+### Local text filters
+
+Vinted's server search is case-insensitive and has no keyword blocklist, so
+these are applied client-side on each result page:
+
+| Flag | Meaning |
+| --- | --- |
+| `--exclude-text WORDS` | hide items whose title contains any term (comma separated) — case-insensitive by default |
+| `--case-sensitive` | enforce exact capitalization locally: query words must appear in titles with the exact case you typed, and `--exclude-text` matches exact case |
+
+Titles are what the catalogue API exposes (descriptions are not part of search
+results).
 
 ### Custom seller-quality filters *(not available on Vinted)*
 
@@ -50,6 +63,13 @@ the box.
 
 Seller profiles are fetched with bounded concurrency and cached across items in
 the same search.
+
+### Categories
+
+`--catalog-ids` takes numeric category ids (comma separated). The easiest way to
+find them: open the category on vinted.com, and read
+`catalog_ids=…` from the URL's search parameters — e.g. the URL when browsing
+"Men's jeans" contains `catalog_ids=1165`.
 
 ### Other commands
 
@@ -73,8 +93,9 @@ the same search.
 
 ## How it works (and its limits)
 
-Vinted has **no official public API**. This tool reuses the endpoints the web
-app calls with an anonymous session:
+Vinted has **no official public API**, and this tool uses **no account** of
+yours. It reuses the endpoints the web app calls with an **anonymous session**:
+no login, no purchase/sale/messaging actions, read-only discovery only.
 
 1. One landing-page request issues an `access_token_web` cookie + `X-Anon-Id`.
 2. Catalogue search goes through `api.<site>/svc-catalogue/items`.

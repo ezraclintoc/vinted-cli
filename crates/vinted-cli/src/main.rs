@@ -7,9 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{Cell, Color, Table};
 use serde_json::json;
-use vinted_core::{
-    models::Condition, SearchFilter, SellerFilter, SortOrder, VintedClient,
-};
+use vinted_core::{SearchFilter, SellerFilter, SortOrder, VintedClient, models::Condition};
 
 #[derive(Parser)]
 #[command(
@@ -23,7 +21,13 @@ struct Cli {
     command: Command,
 
     /// Vinted country domain to use, e.g. com, fr, co.uk.
-    #[arg(long, short = 's', global = true, default_value = "com", value_name = "TLD")]
+    #[arg(
+        long,
+        short = 's',
+        global = true,
+        default_value = "com",
+        value_name = "TLD"
+    )]
     site: String,
 
     /// Force a currency code (USD, EUR, GBP, PLN, CZK, HUF).
@@ -36,6 +40,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The Search variant legitimately carries many filter fields; boxing them all
+// to appease clippy would hurt clarity of the clap definitions.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Search catalogue items, with native filters plus custom seller filters.
     Search {
@@ -77,6 +84,20 @@ enum Command {
         /// Page number (1-based).
         #[arg(long, short = 'p', value_name = "N")]
         page: Option<u32>,
+
+        /// Fetch multiple consecutive pages (merged, de-duplicated).
+        #[arg(long, value_name = "N", conflicts_with = "page")]
+        pages: Option<u32>,
+
+        /// Hide items whose title contains any of these terms (comma
+        /// separated; case-insensitive unless --case-sensitive).
+        #[arg(long, value_name = "WORDS")]
+        exclude_text: Option<String>,
+
+        /// Enforce exact capitalization locally: query words must appear in
+        /// titles (and --exclude-text must match) with the exact case given.
+        #[arg(long)]
+        case_sensitive: bool,
 
         /// Results per page (max 100).
         #[arg(long, short = 'n', value_name = "N")]
@@ -196,6 +217,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             condition,
             order,
             page,
+            pages,
+            exclude_text,
+            case_sensitive,
             limit,
             photo,
             seller_has_reviews,
@@ -229,30 +253,77 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
 
-            let response = client.search(&filter).await?;
+            // Server-side search fetch (single page or merged multi-page).
+            let (response, pages_fetched) = if let Some(pages) = *pages {
+                let merged = client.search_pages(&filter, pages).await?;
+                let fetched = merged.pages_fetched;
+                (merged.response, fetched)
+            } else {
+                let single = client.search(&filter).await?;
+                (single, 1)
+            };
+
+            // Local text filters first (cheap), network seller filters after.
+            let local = vinted_core::LocalFilter {
+                exclude_text: exclude_text
+                    .as_ref()
+                    .map(|s| {
+                        s.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                require_words: if *case_sensitive {
+                    query
+                        .as_ref()
+                        .map(|q| q.split_whitespace().map(|w| w.to_string()).collect())
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                },
+                case: if *case_sensitive {
+                    vinted_core::CaseMode::Exact
+                } else {
+                    vinted_core::CaseMode::IgnoreCase
+                },
+            };
+            let (items, locally_dropped) = local.apply(response.items);
+            let response = vinted_core::SearchResponse {
+                items,
+                pagination: response.pagination,
+            };
 
             let seller_filter = SellerFilter {
                 has_reviews: *seller_has_reviews,
                 min_feedback: *min_seller_feedback,
                 min_reputation: *min_seller_rating,
-                business_only: Some(*business_only).filter(|_| *business_only),
+                business_only: if *business_only { Some(true) } else { None },
                 amateur_only: *amateur_only,
                 exclude_logins: exclude_seller
                     .as_ref()
-                    .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 exclude_ids: exclude_seller_id
                     .as_ref()
-                    .map(|s| s.split(',').map(|x| x.trim().parse::<i64>()).filter_map(|x| x.ok()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|x| x.trim().parse::<i64>())
+                            .filter_map(|x| x.ok())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 concurrency: *concurrency,
                 ..Default::default()
             };
 
-            let enriched = if seller_filter.is_active() {
-                eprintln!(
-                    "→ applying custom seller filters (this checks seller profiles)…"
-                );
+            let mut enriched = if seller_filter.is_active() {
+                eprintln!("→ applying custom seller filters (this checks seller profiles)…");
                 vinted_core::apply_seller_filter(&client, response, &seller_filter).await?
             } else {
                 vinted_core::EnrichedSearch {
@@ -261,11 +332,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     dropped: 0,
                 }
             };
+            enriched.dropped += locally_dropped;
+            if pages_fetched > 1 {
+                eprintln!("→ fetched {pages_fetched} page(s)");
+            }
 
             if cli.json {
                 print_search_json(&enriched);
             } else {
-                print_search_table(&enriched);
+                print_search_table(&enriched, pages_fetched);
             }
         }
 
@@ -292,7 +367,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     println!("material:{m}");
                 }
                 if let Some(p) = &detail.price {
-                    println!("price:   {}", format_price(Some(p.as_str()), detail.currency.as_deref()));
+                    println!(
+                        "price:   {}",
+                        format_price(Some(p.as_str()), detail.currency.as_deref())
+                    );
                 }
                 if let Some(d) = &detail.description {
                     println!("desc:    {}", truncate(d, 300));
@@ -333,7 +411,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 // output helpers
 
-
 fn format_price(amount: Option<&str>, currency: Option<&str>) -> String {
     format!("{} {}", amount.unwrap_or("—"), currency.unwrap_or(""))
 }
@@ -347,7 +424,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-fn print_search_table(enriched: &vinted_core::EnrichedSearch) {
+fn print_search_table(enriched: &vinted_core::EnrichedSearch, pages_fetched: u32) {
     let resp = &enriched.response;
     if resp.items.is_empty() {
         println!("No items matched your filters.");
@@ -369,7 +446,6 @@ fn print_search_table(enriched: &vinted_core::EnrichedSearch) {
         total_pages = p.total_pages;
         total_entries = p.total_entries;
     }
-    let current_page = resp.pagination.as_ref().map(|p| p.current_page).unwrap_or(1);
 
     for item in &resp.items {
         let price = match (&item.price, &item.total_item_price) {
@@ -381,12 +457,19 @@ fn print_search_table(enriched: &vinted_core::EnrichedSearch) {
             (None, Some(t)) => format!("{} {}", t.amount, t.currency_code),
             (None, None) => "—".into(),
         };
-        let (login, fb) = match (&item.user, item.user.as_ref().and_then(|u| enriched.sellers.get(&u.id))) {
+        let (login, fb) = match (
+            &item.user,
+            item.user.as_ref().and_then(|u| enriched.sellers.get(&u.id)),
+        ) {
             (Some(u), Some(info)) => (u.login.clone(), info.feedback_count),
             (Some(u), None) => (u.login.clone(), -1),
             (None, _) => ("?".into(), -1),
         };
-        let fb_cell = if fb >= 0 { fb.to_string() } else { "—".into() };
+        let fb_cell = if fb >= 0 {
+            fb.to_string()
+        } else {
+            "—".into()
+        };
         let promoted = if item.promoted { "*" } else { "" };
 
         let mut row = vec![
@@ -398,22 +481,29 @@ fn print_search_table(enriched: &vinted_core::EnrichedSearch) {
         if show_reviews {
             row.push(Cell::new(fb_cell));
         }
-        row.push(Cell::new(promoted).fg(if item.promoted { Color::Blue } else { Color::Reset }));
+        row.push(Cell::new(promoted).fg(if item.promoted {
+            Color::Blue
+        } else {
+            Color::Reset
+        }));
         table.add_row(row);
     }
 
     println!("{table}");
     if total_entries > 0 {
         println!(
-            "{} items, page {}/{} ({} total)",
+            "{} items ({}/{} pages of results, {} total on site)",
             resp.items.len(),
-            current_page,
+            if pages_fetched == 0 { 1 } else { pages_fetched },
             total_pages,
             total_entries
         );
     }
     if enriched.dropped > 0 {
-        println!("(dropped {} items by custom seller filters)", enriched.dropped);
+        println!(
+            "(dropped {} items by custom seller filters)",
+            enriched.dropped
+        );
     }
 }
 
@@ -430,7 +520,8 @@ fn print_search_json(enriched: &vinted_core::EnrichedSearch) {
                 .map(|s| serde_json::to_value(s).unwrap_or(json!({})));
             let mut v = serde_json::to_value(item).unwrap_or(json!({}));
             if let Some(seller) = seller {
-                v.as_object_mut().map(|o| o.insert("seller_info".into(), seller));
+                v.as_object_mut()
+                    .map(|o| o.insert("seller_info".into(), seller));
             }
             v
         })

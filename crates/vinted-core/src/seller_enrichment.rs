@@ -43,7 +43,7 @@ impl SellerFilter {
             || self.min_reputation.is_some()
             || self.exclude_logins.iter().any(|_| true)
             || self.exclude_ids.iter().any(|_| false)
-            || self.exclude_ids.iter().count() > 0
+            || !self.exclude_ids.is_empty()
             || self.business_only.is_some()
             || self.amateur_only
     }
@@ -73,7 +73,11 @@ pub async fn apply_seller_filter(
         let keep = match user {
             None => false,
             Some(u) => {
-                if filter.exclude_logins.iter().any(|l| l.eq_ignore_ascii_case(&u.login)) {
+                if filter
+                    .exclude_logins
+                    .iter()
+                    .any(|l| l.eq_ignore_ascii_case(&u.login))
+                {
                     return false;
                 }
                 if filter.exclude_ids.contains(&u.id) {
@@ -96,9 +100,8 @@ pub async fn apply_seller_filter(
     });
 
     // Profile-based checks need a network fetch per unique seller.
-    let needs_profile = filter.has_reviews
-        || filter.min_feedback.is_some()
-        || filter.min_reputation.is_some();
+    let needs_profile =
+        filter.has_reviews || filter.min_feedback.is_some() || filter.min_reputation.is_some();
     if needs_profile {
         let mut uniq: Vec<i64> = items
             .iter()
@@ -107,10 +110,10 @@ pub async fn apply_seller_filter(
         uniq.sort_unstable();
         uniq.dedup();
 
-        let conc = filter.concurrency.max(1).min(16);
+        let conc = filter.concurrency.clamp(1, 16);
         let client_ref: Arc<&VintedClient> = Arc::new(client);
 
-        let fetches = futures::stream::iter(uniq.into_iter())
+        let fetches = futures::stream::iter(uniq)
             .map(|uid| {
                 let c = client_ref.clone();
                 async move { (uid, c.seller_info(uid).await.ok()) }
@@ -164,15 +167,13 @@ fn passes(filter: &SellerFilter, info: &SellerInfo) -> bool {
     if filter.has_reviews && info.feedback_count <= 0 {
         return false;
     }
-    if let Some(min) = filter.min_feedback {
-        if info.feedback_count < min {
+    if let Some(min) = filter.min_feedback
+        && info.feedback_count < min {
             return false;
         }
-    }
-    if let Some(min) = filter.min_reputation {
-        if info.feedback_reputation < min {
+    if let Some(min) = filter.min_reputation
+        && info.feedback_reputation < min {
             return false;
         }
-    }
     true
 }
