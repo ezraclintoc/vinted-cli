@@ -95,9 +95,10 @@ enum Command {
         #[arg(long, value_name = "N")]
         min_seller_feedback: Option<i64>,
 
-        /// Only keep items whose seller reputation is >= F (0..=1, e.g. 0.95).
+        /// Only keep items whose seller rating (positive-review ratio, 0..=1)
+        /// is >= F, e.g. 0.95.
         #[arg(long, value_name = "F")]
-        min_seller_reputation: Option<f64>,
+        min_seller_rating: Option<f64>,
 
         /// Only keep items from business/pro sellers.
         #[arg(long, conflicts_with = "amateur_only")]
@@ -199,7 +200,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             photo,
             seller_has_reviews,
             min_seller_feedback,
-            min_seller_reputation,
+            min_seller_rating,
             business_only,
             amateur_only,
             exclude_seller,
@@ -233,7 +234,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let seller_filter = SellerFilter {
                 has_reviews: *seller_has_reviews,
                 min_feedback: *min_seller_feedback,
-                min_reputation: *min_seller_reputation,
+                min_reputation: *min_seller_rating,
                 business_only: Some(*business_only).filter(|_| *business_only),
                 amateur_only: *amateur_only,
                 exclude_logins: exclude_seller

@@ -51,7 +51,7 @@ pub async fn fetch_item_detail(
         let url = format!("{}/items/{id}", tmp.base_url());
         match document_get(http, &tmp, session, &url).await {
             Ok(html) => {
-                let mut detail = og_to_detail(id, &url, &html);
+                let detail = og_to_detail(id, &url, &html);
                 // If OG tags are missing (page retained meta but no tokens),
                 // still return what we parsed.
                 return Ok(detail);
