@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::site::Site;
-use crate::models::{Item, SearchFilter, SearchResponse, SellerInfo, User};
+use crate::models::{SearchFilter, SearchResponse, SellerInfo, User};
 use crate::session::Session;
 use reqwest::Client;
 use std::sync::RwLock;
@@ -75,7 +75,7 @@ impl VintedClient {
             let (status, resp) = op(headers).await?;
 
             match status {
-                200 => return Ok(decode(resp).await?),
+                200 => return Ok(parse_ok::<T>(resp).await?),
                 401 | 403 if !refreshed => {
                     refreshed = true;
                     self.invalidate_session().await;
@@ -85,11 +85,13 @@ impl VintedClient {
                 404 => return Err(Error::NoResults(String::new())),
                 code => {
                     let url = resp.url().to_string();
-                    return Err(Error::Api {
-                        status: code,
-                        url,
-                        body: None,
-                    });
+                    let body_text = resp.text().await.unwrap_or_default();
+                    let head: String = body_text.chars().take(200).collect();
+                    let body = match serde_json::from_str::<T>(&body_text) {
+                        Ok(_) => String::new(),
+                        Err(e) => format!("{e} :: raw: {head}"),
+                    };
+                    return Err(Error::Api { status: code, url, body });
                 }
             }
         }
@@ -171,16 +173,28 @@ impl VintedClient {
 struct UserPayload {
     #[serde(default)]
     user: Option<User>,
+}async fn parse_ok<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T> {
+    let bytes = resp.bytes().await.map_err(Error::Http)?;
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(v) => Ok(v),
+        Err(mut e) => {
+            // Attach a raw-body snippet to the serde message for debugging.
+            let raw = String::from_utf8_lossy(&bytes);
+            if !raw.is_empty() {
+                e = serde::de::Error::custom(format!(
+                    "{}\n  raw-head: {}",
+                    e,
+                    &raw[..raw.len().min(280)]
+                ));
+            }
+            Err(Error::Json(e))
+        }
+    }
 }
 
-async fn decode<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
-    let bytes = resp.bytes().await?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::Api {
-        status: 0,
-        url: String::new(),
-        body: Some(e),
-    })
-}
+async fn _decode_unused() {}
 
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()

@@ -15,12 +15,12 @@ pub enum Error {
     #[error("could not obtain a Vinted session (status {status}) for site {site}")]
     Session { status: u16, site: String },
 
-    #[error("unexpected API response (status {status}) from {url}")]
+    #[error("unexpected API response (status {status}) from {url}\n  {body}")]
     Api {
         status: u16,
         url: String,
-        #[source]
-        body: Option<serde_json::Error>,
+        /// Optional serde error / body snippet for debugging.
+        body: String,
     },
 
     #[error("invalid site `{0}` (use e.g. vinted.com, vinted.fr, vinted.co.uk)")]

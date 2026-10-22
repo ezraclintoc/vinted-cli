@@ -173,19 +173,32 @@ where
     })
 }
 
-/// An image reference.
+/// An image reference (catalogue API shape).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Photo {
     #[serde(default)]
     pub id: i64,
+    /// Large image URL (query-parameter signed CDN link).
+    #[serde(default, rename = "full_size_url")]
+    pub full_size_url: String,
+    /// Pre-cut thumbnail links: {index, url, zoom_url}.
     #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub high_resolution: Option<String>,
-    #[serde(default)]
+    pub thumbnails: Vec<PhotoThumb>,
+    /// Main colour of the picture, e.g. `#84929D`.
+    #[serde(default, rename = "dominant_color")]
     pub dominant_color_hex: Option<String>,
     #[serde(default)]
-    pub dominant_color_id: Option<i64>,
+    pub high_resolution: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhotoThumb {
+    #[serde(default)]
+    pub index: i64,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, rename = "zoom_url")]
+    pub zoom_url: Option<String>,
 }
 
 /// An item returned by a catalogue search.
@@ -312,8 +325,8 @@ pub struct User {
 /// Pagination block in the search response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pagination {
-    #[serde(default, deserialize_with = "de_u32_lenient")]
-    pub current: u32,
+    #[serde(default, alias = "current", deserialize_with = "de_u32_lenient")]
+    pub current_page: u32,
     #[serde(default, deserialize_with = "de_u32_lenient")]
     pub total_pages: u32,
     #[serde(default, deserialize_with = "de_u32_lenient")]

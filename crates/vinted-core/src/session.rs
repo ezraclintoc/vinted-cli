@@ -107,7 +107,7 @@ impl Session {
     /// Full header map for API requests, including the session identity.
     pub fn api_headers(
         &self,
-        site: &Site,
+        _site: &Site,
         origin: &str,
         _csrf: &str,
     ) -> Result<reqwest::header::HeaderMap> {

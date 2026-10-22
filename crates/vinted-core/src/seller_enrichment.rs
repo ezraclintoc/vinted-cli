@@ -8,7 +8,7 @@
 
 use crate::client::VintedClient;
 use crate::error::Result;
-use crate::models::{Item, SearchResponse, SellerInfo};
+use crate::models::{SearchResponse, SellerInfo};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
