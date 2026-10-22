@@ -204,6 +204,13 @@ impl VintedClient {
         crate::details::fetch_item_detail(&self.http, &self.site, &session, id).await
     }
 
+    /// Whether an item's page carries a non-empty seller description.
+    /// (Search results don't include descriptions; this fetches the item
+    /// page, so treat it as the expensive per-item check it is.)
+    pub async fn item_has_description(&self, id: i64) -> Result<bool> {
+        Ok(crate::details::has_description(&self.item(id).await?))
+    }
+
     /// Enrich a single seller (used by the seller-review filters).
     pub async fn seller_info(&self, id: i64) -> Result<SellerInfo> {
         let user: User = self.user(id).await?;
@@ -238,6 +245,7 @@ struct UserPayload {
     #[serde(default)]
     user: Option<User>,
 }
+
 async fn parse_ok<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
     let bytes = resp.bytes().await.map_err(Error::Http)?;
     match serde_json::from_slice::<T>(&bytes) {
@@ -261,4 +269,159 @@ async fn _decode_unused() {}
 
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+#[cfg(test)]
+mod live_probe {
+    //! Manual probes against the real API; not run in CI.
+    //! `cargo test -p vinted-core -- --ignored --nocapture`
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "hits the real API; run manually with --ignored"]
+    async fn probe_brand_filter_post_bodies() {
+        let http = Client::builder().build().unwrap();
+        let site = crate::site::Site {
+            tld: "com".to_string(),
+        };
+        let session = crate::session::Session::fetch(&http, &site, None)
+            .await
+            .unwrap();
+        let origin = site.base_url();
+
+        let bodies = [
+            (
+                "minimal",
+                r#"{"brand_ids":[14],"search_text":"sweatshirt"}"#,
+            ),
+            (
+                "full",
+                r#"{"brand_ids":[14],"search_text":"sweatshirt","currency":"EUR","order":"price_high_to_low","per_page":4}"#,
+            ),
+        ];
+        for (label, body) in &bodies {
+            let url = format!("{}/svc-catalogue/items", site.api_url());
+            let headers = session.api_headers(&site, &origin, "").unwrap();
+            let resp = http
+                .post(&url)
+                .headers(headers)
+                .header("Content-Type", "application/json")
+                .body(*body)
+                .send()
+                .await
+                .unwrap();
+            let text = resp.text().await.unwrap_or_default();
+            let out = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|it| {
+                                let t = it["title"].as_str().unwrap_or("");
+                                format!("{}:{:?} ", it["id"], &t[..t.len().min(28)])
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "post got JSON but no items: {:?}",
+                            &text[..text.len().min(120)]
+                        )
+                    }),
+                Err(_) => format!("non-json: {}", &text[..text.len().min(120)]),
+            };
+            println!("POST ({label}) | {out}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the real API; run manually with --ignored"]
+    async fn probe_brand_filter_param_styles() {
+        let http = Client::builder().build().unwrap();
+        let site = crate::site::Site {
+            tld: "com".to_string(),
+        };
+        let session = crate::session::Session::fetch(&http, &site, None)
+            .await
+            .unwrap();
+        let origin = site.base_url();
+
+        let styles = [
+            ("none", String::new()),
+            ("brand_ids=14", "brand_ids=14".into()),
+            ("brand_ids[]=14", "brand_ids[]=14".into()),
+            ("brand[]=14", "brand[]=14".into()),
+            ("brand=14", "brand=14".into()),
+            ("filter_brand_ids=14", "filter_brand_ids=14".into()),
+        ];
+        for (label, extra) in styles {
+            let url = format!(
+                "{}/svc-catalogue/items?currency=EUR&order=price_high_to_low\
+                 &per_page=4&search_text=sweatshirt&{extra}",
+                site.api_url()
+            );
+            let headers = session.api_headers(&site, &origin, "").unwrap();
+            let resp = http.get(&url).headers(headers).send().await.unwrap();
+            let text = resp.text().await.unwrap_or_default();
+            let out = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|it| {
+                                let t = it["title"].as_str().unwrap_or("");
+                                format!("{}:{:?} ", it["id"], &t[..t.len().min(28)])
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| format!("no-items key: {text:?}")),
+                Err(_) => format!("non-json: {}", &text[..text.len().min(60)]),
+            };
+            println!("[q] {label:>19} | {out}");
+        }
+        // Same styles WITHOUT a text query — the endpoint may treat text
+        // searches differently from pure facet searches.
+        for (label, extra) in [
+            ("none", String::new()),
+            ("brand_ids[]=14", "brand_ids[]=14".into()),
+            ("brand[]=14", "brand[]=14".into()),
+            ("brand_ids=14", "brand_ids=14".into()),
+            ("brand[]=adidas", "brand[]=adidas".into()),
+            ("brand_ids[]=adidas", "brand_ids[]=adidas".into()),
+            ("brand_slug[]=adidas", "brand_slug[]=adidas".into()),
+            ("brand_title[]=adidas", "brand_title[]=adidas".into()),
+            ("catalog[]=1203", "catalog[]=1203".into()),
+            ("catalog_ids[]=1203", "catalog_ids[]=1203".into()),
+        ] {
+            let url = format!(
+                "{}/svc-catalogue/items?currency=EUR&order=price_high_to_low&per_page=4&{extra}",
+                site.api_url()
+            );
+            let headers = session.api_headers(&site, &origin, "").unwrap();
+            let resp = http.get(&url).headers(headers).send().await.unwrap();
+            let text = resp.text().await.unwrap_or_default();
+            let out = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|it| {
+                                let t = it["title"].as_str().unwrap_or("");
+                                format!("{}:{:?} ", it["id"], &t[..t.len().min(28)])
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| format!("no-items key: {text:?}")),
+                Err(_) => format!("non-json: {}", &text[..text.len().min(60)]),
+            };
+            println!("[no-q] {label:>19} | {out}");
+        }
+    }
 }

@@ -3,11 +3,20 @@
 //! Also the reference consumer of `vinted-core` for a future MCP server or
 //! web frontend.
 
-use clap::{Parser, Subcommand, ValueEnum};
+mod storage;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{Cell, Color, Table};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use vinted_core::{SearchFilter, SellerFilter, SortOrder, VintedClient, models::Condition};
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
+use vinted_core::{
+    EnrichedSearch, Item, LocalFilter, SearchFilter, SellerFilter, SortOrder, VintedClient,
+    models::Condition, url_import,
+};
 
 #[derive(Parser)]
 #[command(
@@ -46,106 +55,55 @@ struct Cli {
 enum Command {
     /// Search catalogue items, with native filters plus custom seller filters.
     Search {
-        /// Free-text search query.
-        query: Option<String>,
+        #[command(flatten)]
+        args: SearchArgs,
+    },
 
-        /// Minimum price.
-        #[arg(long, value_name = "PRICE")]
-        price_from: Option<f64>,
+    /// Save a search so you can re-run and diff it later (`vinted diff NAME`).
+    /// The definition is stored as JSON in your user config directory.
+    Save {
+        /// Name to save the search under (letters, digits, . - _ @).
+        name: String,
 
-        /// Maximum price.
-        #[arg(long, value_name = "PRICE")]
-        price_to: Option<f64>,
+        #[command(flatten)]
+        args: SearchArgs,
+    },
 
-        /// Category/catalog ids, comma separated (from a Vinted search URL).
-        #[arg(long, value_name = "IDS")]
-        catalog_ids: Option<String>,
+    /// Re-run a saved search and show what changed since the last run:
+    /// newly listed items (added) and items that left the results
+    /// (sold/removed). The first run just records a baseline.
+    ///
+    /// Uses the marketplace saved with the search (`--site` on `vinted save`).
+    Diff {
+        /// Name the search was saved under.
+        name: String,
 
-        /// Brand ids, comma separated (from a Vinted search URL).
-        #[arg(long, value_name = "IDS")]
-        brand_ids: Option<String>,
-
-        /// Size ids, comma separated (from a Vinted search URL).
-        #[arg(long, value_name = "IDS")]
-        size_ids: Option<String>,
-
-        /// Color ids, comma separated (from a Vinted search URL).
-        #[arg(long, value_name = "IDS")]
-        color_ids: Option<String>,
-
-        /// Item condition filter(s). Repeatable.
-        #[arg(long, value_enum, value_name = "COND")]
-        condition: Vec<ConditionArg>,
-
-        /// Result order.
-        #[arg(long, value_enum, value_name = "ORDER")]
-        order: Option<OrderArg>,
-
-        /// Page number (1-based).
-        #[arg(long, short = 'p', value_name = "N")]
-        page: Option<u32>,
-
-        /// Fetch multiple consecutive pages (merged, de-duplicated).
-        #[arg(long, value_name = "N", conflicts_with = "page")]
+        /// Override the number of pages fetched (deeper = more reliable
+        /// add/sold detection, slower).
+        #[arg(long, value_name = "N")]
         pages: Option<u32>,
 
-        /// Hide items whose title contains any of these terms (comma
-        /// separated; case-insensitive unless --case-sensitive).
-        #[arg(long, value_name = "WORDS")]
-        exclude_text: Option<String>,
-
-        /// Enforce exact capitalization locally: query words must appear in
-        /// titles (and --exclude-text must match) with the exact case given.
-        #[arg(long)]
-        case_sensitive: bool,
-
-        /// Results per page (max 100).
-        #[arg(long, short = 'n', value_name = "N")]
-        limit: Option<u32>,
-
-        /// Only items with photos.
-        #[arg(long)]
-        photo: bool,
-
-        // ---- custom seller filters (not natively available on Vinted) ----
-        /// Only keep items whose seller has at least one review.
-        #[arg(long)]
-        seller_has_reviews: bool,
-
-        /// Only keep items whose seller has at least N feedback reviews.
-        #[arg(long, value_name = "N")]
-        min_seller_feedback: Option<i64>,
-
-        /// Only keep items whose seller rating (positive-review ratio, 0..=1)
-        /// is >= F, e.g. 0.95.
-        #[arg(long, value_name = "F")]
-        min_seller_rating: Option<f64>,
-
-        /// Only keep items from business/pro sellers.
-        #[arg(long, conflicts_with = "amateur_only")]
-        business_only: bool,
-
-        /// Only keep items from private (non-business) sellers.
-        #[arg(long)]
-        amateur_only: bool,
-
-        /// Exclude sellers by login, comma separated.
-        #[arg(long, value_name = "LOGINS")]
-        exclude_seller: Option<String>,
-
-        /// Exclude sellers by id, comma separated.
-        #[arg(long, value_name = "IDS")]
-        exclude_seller_id: Option<String>,
-
-        /// Max concurrent seller-profile lookups (1..=16).
-        #[arg(long, default_value_t = 8, value_name = "N")]
-        concurrency: usize,
+        /// Also write the diff to this CSV file
+        /// (columns: status,id,title,price,seller,url).
+        #[arg(long, value_name = "FILE")]
+        export: Option<PathBuf>,
     },
+
+    /// List saved searches.
+    Searches,
+
+    /// Delete a saved search (and any recorded watch state).
+    Forget {
+        /// Name the search was saved under.
+        name: String,
+    },
+
     /// Show full details for one item.
     Item {
         /// Numeric item id (from a Vinted item URL).
         id: i64,
     },
+
     /// Show a seller profile with their review stats.
     User {
         /// Numeric user id (from a Vinted member URL).
@@ -153,7 +111,122 @@ enum Command {
     },
 }
 
-#[derive(ValueEnum, Clone, Copy)]
+/// Everything `vinted search` accepts; shared by `vinted save`/`diff` because
+/// saved searches persist (and reload) this exact set of flags.
+#[derive(Args, Clone, Debug, Serialize, Deserialize)]
+struct SearchArgs {
+    /// Free-text search query.
+    query: Option<String>,
+
+    /// Minimum price.
+    #[arg(long, value_name = "PRICE")]
+    price_from: Option<f64>,
+
+    /// Maximum price.
+    #[arg(long, value_name = "PRICE")]
+    price_to: Option<f64>,
+
+    /// Category/catalog ids, comma separated (copy them from a Vinted search
+    /// URL, or use --from-url instead).
+    #[arg(long, value_name = "IDS")]
+    catalog_ids: Option<String>,
+
+    /// Brand ids, comma separated (copy them from a Vinted search URL, or use
+    /// --from-url instead).
+    #[arg(long, value_name = "IDS")]
+    brand_ids: Option<String>,
+
+    /// Size ids, comma separated (from a Vinted search URL).
+    #[arg(long, value_name = "IDS")]
+    size_ids: Option<String>,
+
+    /// Color ids, comma separated (from a Vinted search URL).
+    #[arg(long, value_name = "IDS")]
+    color_ids: Option<String>,
+
+    /// Item condition filter(s). Repeatable.
+    #[arg(long, value_enum, value_name = "COND")]
+    condition: Vec<ConditionArg>,
+
+    /// Result order.
+    #[arg(long, value_enum, value_name = "ORDER")]
+    order: Option<OrderArg>,
+
+    /// Page number (1-based).
+    #[arg(long, short = 'p', value_name = "N")]
+    page: Option<u32>,
+
+    /// Fetch multiple consecutive pages (merged, de-duplicated).
+    #[arg(long, value_name = "N", conflicts_with = "page")]
+    pages: Option<u32>,
+
+    /// Hide items whose title contains any of these terms (comma
+    /// separated; case-insensitive unless --case-sensitive).
+    #[arg(long, value_name = "WORDS")]
+    exclude_text: Option<String>,
+
+    /// Enforce exact capitalization locally: query words must appear in
+    /// titles (and --exclude-text must match) with the exact case given.
+    #[arg(long)]
+    case_sensitive: bool,
+
+    /// Results per page (max 100).
+    #[arg(long, short = 'n', value_name = "N")]
+    limit: Option<u32>,
+
+    /// Only items with photos.
+    #[arg(long)]
+    photo: bool,
+
+    /// Only keep items that have a seller description. Search results don't
+    /// carry descriptions, so this fetches each item page afterwards —
+    /// one request per item, noticeably slower.
+    #[arg(long)]
+    with_description: bool,
+
+    /// Build the filter from a pasted Vinted search URL instead of hunting
+    /// for catalog/brand/size/colour ids: filters tapped in the browser are
+    /// reflected in the URL and parsed from there. Explicit flags override
+    /// what the URL sets.
+    #[arg(long, value_name = "URL")]
+    from_url: Option<String>,
+
+    // ---- custom seller filters (not natively available on Vinted) ----
+    /// Only keep items whose seller has at least one review.
+    #[arg(long)]
+    seller_has_reviews: bool,
+
+    /// Only keep items whose seller has at least N feedback reviews.
+    #[arg(long, value_name = "N")]
+    min_seller_feedback: Option<i64>,
+
+    /// Only keep items whose seller rating (positive-review ratio, 0..=1)
+    /// is >= F, e.g. 0.95.
+    #[arg(long, value_name = "F")]
+    min_seller_rating: Option<f64>,
+
+    /// Only keep items from business/pro sellers.
+    #[arg(long, conflicts_with = "amateur_only")]
+    business_only: bool,
+
+    /// Only keep items from private (non-business) sellers.
+    #[arg(long)]
+    amateur_only: bool,
+
+    /// Exclude sellers by login, comma separated.
+    #[arg(long, value_name = "LOGINS")]
+    exclude_seller: Option<String>,
+
+    /// Exclude sellers by id, comma separated.
+    #[arg(long, value_name = "IDS")]
+    exclude_seller_id: Option<String>,
+
+    /// Max concurrent seller-profile lookups (1..=16).
+    #[arg(long, default_value_t = 8, value_name = "N")]
+    concurrency: usize,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Serialize, Deserialize)]
 enum ConditionArg {
     NewWithTag,
     NewNoTag,
@@ -174,7 +247,7 @@ impl From<ConditionArg> for Condition {
     }
 }
 
-#[derive(ValueEnum, Clone)]
+#[derive(ValueEnum, Clone, Debug, Serialize, Deserialize)]
 enum OrderArg {
     Relevance,
     NewestFirst,
@@ -202,149 +275,145 @@ async fn main() {
     }
 }
 
+/// Snapshot of an item as stored in watch state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ItemSnap {
+    title: String,
+    #[serde(default)]
+    price: Option<String>,
+    #[serde(default)]
+    seller: Option<String>,
+    #[serde(default)]
+    url: String,
+}
+
+/// A previously-seen item that disappeared from the results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SoldRec {
+    item: ItemSnap,
+    /// Unix seconds when the item was last seen missing.
+    #[allow(dead_code)] // persisted for future got-notified-on tooling
+    gone_at: u64,
+}
+
+/// Watch state for `vinted diff`: what was seen last run, plus an
+/// accumulating ledger of everything that left the results.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct WatchState {
+    active: BTreeMap<i64, ItemSnap>,
+    sold: BTreeMap<i64, SoldRec>,
+    #[serde(default)]
+    last_run: u64,
+}
+
+fn snap(item: &Item) -> ItemSnap {
+    let price = item
+        .total_item_price
+        .as_ref()
+        .or(item.price.as_ref())
+        .map(|p| format!("{} {}", p.amount, p.currency_code));
+    ItemSnap {
+        title: item.title.clone(),
+        price,
+        seller: item.user.as_ref().map(|u| u.login.clone()),
+        url: item.url.clone(),
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let client = VintedClient::new(&cli.site, cli.currency.clone())?;
-
     match &cli.command {
-        Command::Search {
-            query,
-            price_from,
-            price_to,
-            catalog_ids,
-            brand_ids,
-            size_ids,
-            color_ids,
-            condition,
-            order,
-            page,
-            pages,
-            exclude_text,
-            case_sensitive,
-            limit,
-            photo,
-            seller_has_reviews,
-            min_seller_feedback,
-            min_seller_rating,
-            business_only,
-            amateur_only,
-            exclude_seller,
-            exclude_seller_id,
-            concurrency,
-        } => {
-            if query.is_none() && catalog_ids.is_none() && brand_ids.is_none() {
-                eprintln!("Provide a QUERY or at least one of --catalog-ids/--brand-ids.");
-                std::process::exit(2);
-            }
-
-            let filter = SearchFilter {
-                search_text: query.clone(),
-                catalog_ids: catalog_ids.clone(),
-                brand_ids: brand_ids.clone(),
-                size_ids: size_ids.clone(),
-                color_ids: color_ids.clone(),
-                conditions: condition.iter().map(|&c| Condition::from(c)).collect(),
-                price_from: *price_from,
-                price_to: *price_to,
-                currency: cli.currency.clone(),
-                order: order.clone().map(|o| o.into()),
-                page: *page,
-                per_page: *limit,
-                with_photo: *photo,
-                ..Default::default()
-            };
-
-            // Server-side search fetch (single page or merged multi-page).
-            let (response, pages_fetched) = if let Some(pages) = *pages {
-                let merged = client.search_pages(&filter, pages).await?;
-                let fetched = merged.pages_fetched;
-                (merged.response, fetched)
-            } else {
-                let single = client.search(&filter).await?;
-                (single, 1)
-            };
-
-            // Local text filters first (cheap), network seller filters after.
-            let local = vinted_core::LocalFilter {
-                exclude_text: exclude_text
-                    .as_ref()
-                    .map(|s| {
-                        s.split(',')
-                            .map(|x| x.trim().to_string())
-                            .filter(|x| !x.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                require_words: if *case_sensitive {
-                    query
-                        .as_ref()
-                        .map(|q| q.split_whitespace().map(|w| w.to_string()).collect())
-                        .unwrap_or_default()
-                } else {
-                    Default::default()
-                },
-                case: if *case_sensitive {
-                    vinted_core::CaseMode::Exact
-                } else {
-                    vinted_core::CaseMode::IgnoreCase
-                },
-            };
-            let (items, locally_dropped) = local.apply(response.items);
-            let response = vinted_core::SearchResponse {
-                items,
-                pagination: response.pagination,
-            };
-
-            let seller_filter = SellerFilter {
-                has_reviews: *seller_has_reviews,
-                min_feedback: *min_seller_feedback,
-                min_reputation: *min_seller_rating,
-                business_only: if *business_only { Some(true) } else { None },
-                amateur_only: *amateur_only,
-                exclude_logins: exclude_seller
-                    .as_ref()
-                    .map(|s| {
-                        s.split(',')
-                            .map(|x| x.trim().to_string())
-                            .filter(|x| !x.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                exclude_ids: exclude_seller_id
-                    .as_ref()
-                    .map(|s| {
-                        s.split(',')
-                            .map(|x| x.trim().parse::<i64>())
-                            .filter_map(|x| x.ok())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                concurrency: *concurrency,
-                ..Default::default()
-            };
-
-            let mut enriched = if seller_filter.is_active() {
-                eprintln!("→ applying custom seller filters (this checks seller profiles)…");
-                vinted_core::apply_seller_filter(&client, response, &seller_filter).await?
-            } else {
-                vinted_core::EnrichedSearch {
-                    response,
-                    sellers: Default::default(),
-                    dropped: 0,
-                }
-            };
-            enriched.dropped += locally_dropped;
-            if pages_fetched > 1 {
-                eprintln!("→ fetched {pages_fetched} page(s)");
-            }
-
+        Command::Search { args } => {
+            let client = VintedClient::new(&cli.site, cli.currency.clone())?;
+            let run = execute_search(&client, args).await?;
             if cli.json {
-                print_search_json(&enriched);
+                print_search_json(&run.enriched);
             } else {
-                print_search_table(&enriched, pages_fetched);
+                print_search_table(&run.enriched, run.pages_fetched);
             }
         }
 
+        Command::Save { name, args } => {
+            let name = storage::sanitize(name)?;
+            let def = json!({
+                "name": name,
+                "site": cli.site,
+                "currency": cli.currency,
+                "created_at": now_secs(),
+                "args": args,
+            });
+            let existed = storage::save_search(&name, &serde_json::to_string_pretty(&def)?)?;
+            if existed {
+                eprintln!("(overwriting previously saved search `{name}`)");
+            }
+            println!("saved search `{name}` — run it and diff with: vinted diff {name}");
+        }
+
+        Command::Searches => {
+            let names = storage::list_searches();
+            if names.is_empty() {
+                println!(
+                    "No saved searches yet. Create one with: vinted save NAME <query> [flags]"
+                );
+                return Ok(());
+            }
+            for name in names {
+                let summary = storage::load_search(&name)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .map(|v| {
+                        let site = v["site"].as_str().unwrap_or("?").to_string();
+                        let q = v["args"]["query"].as_str().unwrap_or("-").to_string();
+                        format!("site={site} query={q:?}")
+                    })
+                    .unwrap_or_else(|| "(unreadable definition)".to_string());
+                println!("{name:<24} {summary}");
+            }
+        }
+
+        Command::Forget { name } => {
+            let name = storage::sanitize(name)?;
+            let removed_search = storage::delete_search(&name);
+            let removed_state = storage::delete_state(&name);
+            if removed_search || removed_state {
+                println!("forgot `{name}`");
+            } else {
+                println!("no saved search named `{name}`");
+            }
+        }
+
+        Command::Diff {
+            name,
+            pages,
+            export,
+        } => {
+            let def_text = storage::load_search(name)?;
+            #[derive(Deserialize)]
+            struct SavedSearch {
+                site: String,
+                currency: Option<String>,
+                args: SearchArgs,
+            }
+            let def: SavedSearch = serde_json::from_str(&def_text)
+                .map_err(|e| format!("saved search `{name}` is unreadable ({e}); re-save it"))?;
+            let mut args = def.args;
+            if let Some(p) = pages {
+                args.pages = Some(*p);
+                args.page = None;
+            }
+            let currency = cli.currency.clone().or(def.currency);
+            let client = VintedClient::new(&def.site, currency)?;
+            diff(&cli, name, &client, &args, export.clone()).await?;
+        }
+
         Command::Item { id } => {
+            let client = VintedClient::new(&cli.site, cli.currency.clone())?;
             let detail = client.item(*id).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&detail)?);
@@ -383,6 +452,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::User { id } => {
+            let client = VintedClient::new(&cli.site, cli.currency.clone())?;
             let user = client.user(*id).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&user)?);
@@ -409,6 +479,373 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
+// search pipeline (shared by `search` and `diff`)
+
+struct Run {
+    enriched: EnrichedSearch,
+    pages_fetched: u32,
+}
+
+/// Turn parsed flags into a server-side [`SearchFilter`].
+///
+/// `--from-url` provides the base; explicit flags win where they are set.
+fn build_filter(args: &SearchArgs) -> Result<SearchFilter, String> {
+    let mut filter = match &args.from_url {
+        Some(url) => url_import::parse_search_url(url).map_err(|e| format!("--from-url: {e}"))?,
+        None => SearchFilter::default(),
+    };
+    if filter.search_text.is_none() {
+        filter.search_text = args.query.clone();
+    }
+    if filter.catalog_ids.is_none() {
+        filter.catalog_ids = args.catalog_ids.clone();
+    }
+    if filter.brand_ids.is_none() {
+        filter.brand_ids = args.brand_ids.clone();
+    }
+    if filter.size_ids.is_none() {
+        filter.size_ids = args.size_ids.clone();
+    }
+    if filter.color_ids.is_none() {
+        filter.color_ids = args.color_ids.clone();
+    }
+    if filter.conditions.is_empty() {
+        filter.conditions = args.condition.iter().map(|&c| Condition::from(c)).collect();
+    }
+    if filter.price_from.is_none() {
+        filter.price_from = args.price_from;
+    }
+    if filter.price_to.is_none() {
+        filter.price_to = args.price_to;
+    }
+    if filter.order.is_none() {
+        filter.order = args.order.clone().map(|o| o.into());
+    }
+    if filter.page.is_none() {
+        filter.page = args.page;
+    }
+    if filter.per_page.is_none() {
+        filter.per_page = args.limit;
+    }
+    if !filter.with_photo {
+        filter.with_photo = args.photo;
+    }
+    Ok(filter)
+}
+
+fn local_filter(args: &SearchArgs) -> LocalFilter {
+    LocalFilter {
+        exclude_text: split_comma(&args.exclude_text),
+        require_words: if args.case_sensitive {
+            args.query
+                .as_ref()
+                .map(|q| q.split_whitespace().map(|w| w.to_string()).collect())
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        },
+        case: if args.case_sensitive {
+            vinted_core::CaseMode::Exact
+        } else {
+            vinted_core::CaseMode::IgnoreCase
+        },
+    }
+}
+
+fn seller_filter(args: &SearchArgs) -> SellerFilter {
+    SellerFilter {
+        has_reviews: args.seller_has_reviews,
+        min_feedback: args.min_seller_feedback,
+        min_reputation: args.min_seller_rating,
+        business_only: if args.business_only { Some(true) } else { None },
+        amateur_only: args.amateur_only,
+        exclude_logins: split_comma(&args.exclude_seller),
+        exclude_ids: args
+            .exclude_seller_id
+            .as_ref()
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().parse::<i64>())
+                    .filter_map(|x| x.ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        concurrency: args.concurrency,
+        ..Default::default()
+    }
+}
+
+fn split_comma(opt: &Option<String>) -> Vec<String> {
+    opt.as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch + filter: server search, local text filters, seller-quality filters
+/// and (optionally) the with-description check. Cheap local filters run
+/// before the expensive per-item/page ones.
+async fn execute_search(
+    client: &VintedClient,
+    args: &SearchArgs,
+) -> Result<Run, Box<dyn std::error::Error>> {
+    let filter = build_filter(args)?;
+    if filter.search_text.is_none() && filter.catalog_ids.is_none() && filter.brand_ids.is_none() {
+        return Err(
+            "Provide a QUERY, --from-url, or at least one of --catalog-ids/--brand-ids.".into(),
+        );
+    }
+
+    // Server-side search fetch (single page or merged multi-page).
+    let (response, pages_fetched) = if let Some(pages) = args.pages {
+        let merged = client.search_pages(&filter, pages).await?;
+        let fetched = merged.pages_fetched;
+        (merged.response, fetched)
+    } else {
+        (client.search(&filter).await?, 1)
+    };
+    if pages_fetched > 1 {
+        eprintln!("→ fetched {pages_fetched} page(s)");
+    }
+
+    // Local text filters first (cheap), network seller filters after.
+    let local = local_filter(args);
+    let (items, locally_dropped) = local.apply(response.items);
+    let response = vinted_core::SearchResponse {
+        items,
+        pagination: response.pagination,
+    };
+
+    let seller = seller_filter(args);
+    let mut enriched = if seller.is_active() {
+        eprintln!("→ applying custom seller filters (this checks seller profiles)…");
+        vinted_core::apply_seller_filter(client, response, &seller).await?
+    } else {
+        EnrichedSearch {
+            response,
+            sellers: Default::default(),
+            dropped: 0,
+        }
+    };
+    enriched.dropped += locally_dropped;
+
+    // Optional: drop items without a description. Descriptions are not in
+    // search responses, so this fetches the item page for every survivor.
+    if args.with_description && !enriched.response.items.is_empty() {
+        let n = enriched.response.items.len();
+        eprintln!("→ checking {n} item pages for descriptions (this may take a while)…");
+        let conc = args.concurrency.clamp(1, 8);
+        let items = std::mem::take(&mut enriched.response.items);
+        let kept: Vec<Item> = futures::stream::iter(items)
+            .map(|item| async move {
+                let res = client.item_has_description(item.id).await;
+                (res, item)
+            })
+            .buffer_unordered(conc)
+            .filter_map(|(res, item)| async move {
+                match res {
+                    // Items without description are dropped; items whose page
+                    // could not be checked are kept (fail-open).
+                    Ok(true) | Err(_) => Some(item),
+                    Ok(false) => None,
+                }
+            })
+            .collect()
+            .await;
+        let missing_dropped = n - kept.len();
+        enriched.dropped += missing_dropped;
+        enriched.response.items = kept;
+    }
+
+    Ok(Run {
+        enriched,
+        pages_fetched,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// diff
+
+async fn diff(
+    cli: &Cli,
+    name: &str,
+    client: &VintedClient,
+    args: &SearchArgs,
+    export: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = execute_search(client, args).await?;
+    let current: Vec<(i64, ItemSnap)> = run
+        .enriched
+        .response
+        .items
+        .iter()
+        .map(|item| (item.id, snap(item)))
+        .collect();
+
+    let now = now_secs();
+    let prev: Option<WatchState> =
+        storage::load_state(name).and_then(|text| serde_json::from_str(&text).ok());
+
+    // First run: record a baseline instead of calling all N items "added".
+    let Some(mut state) = prev else {
+        let new_state = WatchState {
+            active: current.iter().cloned().collect(),
+            sold: BTreeMap::new(),
+            last_run: now,
+        };
+        storage::save_state(name, &serde_json::to_string_pretty(&new_state)?)?;
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "baseline_recorded": true,
+                    "items": current.len(),
+                }))?
+            );
+        } else {
+            println!(
+                "Baseline recorded: {} items seen. Run `vinted diff {name}` again to see added and sold/removed items.",
+                current.len()
+            );
+        }
+        return Ok(());
+    };
+
+    let current_ids: HashSet<i64> = current.iter().map(|(id, _)| *id).collect();
+
+    let mut added: Vec<(i64, ItemSnap)> = Vec::new();
+    for (id, item) in &current {
+        if !state.active.contains_key(id) {
+            if state.sold.contains_key(id) {
+                // Item bucked the "sold" prediction and is listed again.
+                state.sold.remove(id);
+            }
+            added.push((*id, item.clone()));
+        }
+    }
+
+    let mut removed: Vec<(i64, ItemSnap)> = Vec::new();
+    for (id, item) in state.active.clone() {
+        if !current_ids.contains(&id) {
+            state.sold.insert(
+                id,
+                SoldRec {
+                    item: item.clone(),
+                    gone_at: now,
+                },
+            );
+            removed.push((id, item));
+        }
+    }
+
+    // Refresh the active snapshot (prices/titles can change between runs).
+    state.active = current.iter().cloned().collect();
+    state.last_run = now;
+    storage::save_state(name, &serde_json::to_string_pretty(&state)?)?;
+
+    let unchanged = current.len().saturating_sub(added.len());
+    if cli.json {
+        let entries = |list: &[(i64, ItemSnap)]| {
+            list.iter()
+                .map(|(id, s)| {
+                    json!({
+                        "id": id,
+                        "title": s.title,
+                        "price": s.price,
+                        "seller": s.seller,
+                        "url": s.url,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "added": entries(&added),
+                "sold_removed": entries(&removed),
+                "unchanged": unchanged,
+            }))?
+        );
+    } else {
+        if added.is_empty() && removed.is_empty() {
+            println!("No changes since the last run ({unchanged} items unchanged).");
+        } else {
+            if !added.is_empty() {
+                println!("+ added ({}):", added.len());
+                for (id, item) in &added {
+                    println!(
+                        "  [{id}] {} — {} — {}",
+                        truncate(&item.title, 60),
+                        item.price.as_deref().unwrap_or("—"),
+                        item.seller.as_deref().unwrap_or("—")
+                    );
+                }
+            }
+            if !removed.is_empty() {
+                println!("- sold/removed ({}):", removed.len());
+                for (id, item) in &removed {
+                    println!(
+                        "  [{id}] {} — {} — {}",
+                        truncate(&item.title, 60),
+                        item.price.as_deref().unwrap_or("—"),
+                        item.seller.as_deref().unwrap_or("—")
+                    );
+                }
+            }
+            println!("{unchanged} items unchanged");
+        }
+    }
+
+    if let Some(path) = export {
+        export_csv(&path, &added, &removed)?;
+        eprintln!("→ wrote diff to {}", path.display());
+    }
+    if run.pages_fetched > 1 {
+        eprintln!("(checked {} page(s))", run.pages_fetched);
+    }
+    Ok(())
+}
+
+fn export_csv(
+    path: &PathBuf,
+    added: &[(i64, ItemSnap)],
+    removed: &[(i64, ItemSnap)],
+) -> Result<(), String> {
+    let mut out = String::from("status,id,title,price,seller,url\n");
+    let mut rows = 0usize;
+    let push_row = |out: &mut String, status: &str, id: i64, item: &ItemSnap| {
+        out.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            status,
+            id,
+            csv_cell(&item.title),
+            csv_cell(item.price.as_deref().unwrap_or("")),
+            csv_cell(item.seller.as_deref().unwrap_or("")),
+            csv_cell(&item.url),
+        ));
+    };
+    for (id, item) in added {
+        push_row(&mut out, "added", *id, item);
+        rows += 1;
+    }
+    for (id, item) in removed {
+        push_row(&mut out, "sold/removed", *id, item);
+        rows += 1;
+    }
+    std::fs::write(path, out).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    eprintln!("wrote {rows} diff row(s) to {}", path.display());
+    Ok(())
+}
+
+fn csv_cell(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+// ---------------------------------------------------------------------------
 // output helpers
 
 fn format_price(amount: Option<&str>, currency: Option<&str>) -> String {
@@ -424,7 +861,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-fn print_search_table(enriched: &vinted_core::EnrichedSearch, pages_fetched: u32) {
+fn print_search_table(enriched: &EnrichedSearch, pages_fetched: u32) {
     let resp = &enriched.response;
     if resp.items.is_empty() {
         println!("No items matched your filters.");
@@ -500,14 +937,11 @@ fn print_search_table(enriched: &vinted_core::EnrichedSearch, pages_fetched: u32
         );
     }
     if enriched.dropped > 0 {
-        println!(
-            "(dropped {} items by custom seller filters)",
-            enriched.dropped
-        );
+        println!("(dropped {} items by custom filters)", enriched.dropped);
     }
 }
 
-fn print_search_json(enriched: &vinted_core::EnrichedSearch) {
+fn print_search_json(enriched: &EnrichedSearch) {
     let items: Vec<serde_json::Value> = enriched
         .response
         .items

@@ -122,6 +122,20 @@ async fn document_get(http: &Client, site: &Site, session: &Session, url: &str) 
     Ok(html)
 }
 
+/// Does this listing visibly carry a seller-written description?
+///
+/// The `og:description` tag usually reads `"<title> - <body>"`; an item
+/// without a body ends up with just the title. Search results don't contain
+/// descriptions at all, so this is used for `--with-description` filtering.
+pub fn has_description(detail: &ItemDetail) -> bool {
+    let Some(d) = &detail.description else {
+        return false;
+    };
+    let prefix = format!("{} - ", detail.title);
+    let body = d.strip_prefix(&prefix).unwrap_or(d).trim();
+    !body.is_empty()
+}
+
 fn meta_tag(html: &str, property: &str) -> Option<String> {
     // Scan every `<meta …>` tag and pick the one whose `property`/`name`
     // attribute matches, in either attribute order.

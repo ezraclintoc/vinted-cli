@@ -12,10 +12,12 @@ pub mod seller_enrichment;
 pub mod session;
 pub mod site;
 pub mod ua;
+pub mod url_import;
 
 pub use client::MergedSearch;
 pub use client::VintedClient;
 pub use details::ItemDetail;
+pub use details::has_description;
 pub use error::{Error, Result};
 pub use local_filters::{CaseMode, LocalFilter};
 pub use models::{Item, SearchFilter, SearchResponse, SellerInfo, SortOrder, User};

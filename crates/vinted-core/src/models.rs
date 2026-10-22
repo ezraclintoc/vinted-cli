@@ -100,19 +100,29 @@ impl SearchFilter {
         if let Some(q) = &self.query {
             pairs.push(("query".into(), q.clone()));
         }
+        // The web front sends these as repeated array parameters
+        // (`brand_ids[]=14&brand_ids[]=15`); the comma-joined non-array form
+        // is silently ignored by the API, which makes the filters appear to
+        // do nothing.
         for (key, val) in [
-            ("catalog_ids", &self.catalog_ids),
-            ("brand_ids", &self.brand_ids),
-            ("size_ids", &self.size_ids),
-            ("color_ids", &self.color_ids),
+            ("catalog_ids[]", &self.catalog_ids),
+            ("brand_ids[]", &self.brand_ids),
+            ("size_ids[]", &self.size_ids),
+            ("color_ids[]", &self.color_ids),
         ] {
             if let Some(v) = val {
-                pairs.push((key.to_string(), v.clone()));
+                for id in v.split(',') {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        pairs.push((key.to_string(), id.to_string()));
+                    }
+                }
             }
         }
         if !self.conditions.is_empty() {
-            let ids: Vec<String> = self.conditions.iter().map(|c| c.id().to_string()).collect();
-            pairs.push(("status_ids".into(), ids.join(",")));
+            for c in &self.conditions {
+                pairs.push(("status_ids[]".to_string(), c.id().to_string()));
+            }
         }
         if let Some(p) = self.price_from {
             pairs.push(("price_from".into(), format!("{p}")));
@@ -362,5 +372,72 @@ impl SearchResponse {
     /// OpenGraph item page (see `VintedClient::item`).
     pub fn has_items(&self) -> bool {
         !self.items.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_facets_are_emitted_as_array_params() {
+        let f = SearchFilter {
+            search_text: Some("dell laptop".into()),
+            catalog_ids: Some("1203,1789".into()),
+            brand_ids: Some("14".into()),
+            size_ids: Some(" 20 , 21 ".into()),
+            conditions: vec![Condition::VeryGood],
+            price_to: Some(50.0),
+            ..Default::default()
+        };
+        let pairs = f.to_query_pairs();
+        assert!(pairs.contains(&("search_text".to_string(), "dell laptop".to_string())));
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(k, _)| k == "catalog_ids[]")
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>(),
+            vec!["1203".to_string(), "1789".to_string()]
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(k, _)| k == "brand_ids[]")
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>(),
+            vec!["14".to_string()]
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(k, _)| k == "size_ids[]")
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>(),
+            vec!["20".to_string(), "21".to_string()]
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(k, _)| k == "status_ids[]")
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>(),
+            vec![Condition::VeryGood.id().to_string()]
+        );
+        assert!(pairs.contains(&("price_to".to_string(), "50".to_string())));
+    }
+
+    #[test]
+    fn empty_facets_emit_nothing() {
+        let f = SearchFilter {
+            search_text: Some("x".into()),
+            ..Default::default()
+        };
+        let pairs = f.to_query_pairs();
+        assert!(
+            !pairs
+                .iter()
+                .any(|(k, _)| k.ends_with("[]") || k.starts_with("status"))
+        );
     }
 }
