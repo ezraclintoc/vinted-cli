@@ -168,12 +168,14 @@ fn passes(filter: &SellerFilter, info: &SellerInfo) -> bool {
         return false;
     }
     if let Some(min) = filter.min_feedback
-        && info.feedback_count < min {
-            return false;
-        }
+        && info.feedback_count < min
+    {
+        return false;
+    }
     if let Some(min) = filter.min_reputation
-        && info.feedback_reputation < min {
-            return false;
-        }
+        && info.feedback_reputation < min
+    {
+        return false;
+    }
     true
 }

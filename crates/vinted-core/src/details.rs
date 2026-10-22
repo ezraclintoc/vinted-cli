@@ -177,7 +177,7 @@ fn og_to_detail(id: i64, url: &str, html: &str) -> ItemDetail {
         })
         .unwrap_or_default();
     let (price, currency) = schema_price(html);
-    
+
     ItemDetail {
         id,
         title,
