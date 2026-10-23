@@ -3,7 +3,10 @@
 //! Also the reference consumer of `vinted-core` for a future MCP server or
 //! web frontend.
 
-mod storage;
+pub(crate) mod storage;
+
+mod mcp_install;
+mod mcp_server;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::presets::ASCII_MARKDOWN;
@@ -109,12 +112,61 @@ enum Command {
         /// Numeric user id (from a Vinted member URL).
         id: i64,
     },
+
+    /// Run the MCP (Model Context Protocol) server or register it with an
+    /// agent harness — see `vinted mcp serve --help` / `vinted mcp install
+    /// --help`.
+    Mcp {
+        #[command(subcommand)]
+        mcp_command: McpCommand,
+    },
 }
 
-/// Everything `vinted search` accepts; shared by `vinted save`/`diff` because
-/// saved searches persist (and reload) this exact set of flags.
-#[derive(Args, Clone, Debug, Serialize, Deserialize)]
-struct SearchArgs {
+/// Subcommands of `vinted mcp`.
+#[derive(Subcommand, Debug)]
+enum McpCommand {
+    /// Serve the Vinted MCP tools over stdio (long-running; launched by the
+    /// agent harness, not by hand).
+    Serve,
+    /// Register this binary's `vinted mcp serve` with one or more agent
+    /// harnesses (Claude Code, Codex, Goose, Freebuff, Cursor, Windsurf).
+    Install {
+        /// Which harness(es) to register with; repeatable.
+        #[arg(long, value_enum, value_name = "CLIENT")]
+        client: Vec<McpClientArg>,
+
+        /// Register with every supported harness regardless of whether its
+        /// config is detected.
+        #[arg(long)]
+        all: bool,
+
+        /// Print what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Harnesses `vinted mcp install` knows how to write configs for.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum McpClientArg {
+    /// Claude Code (user scope, ~/.claude.json)
+    Claude,
+    /// OpenAI Codex CLI (~/.codex/config.toml)
+    Codex,
+    /// Goose (~/.config/goose/config.yaml)
+    Goose,
+    /// Freebuff (.agents/mcp.json in the current project)
+    Freebuff,
+    /// Cursor (~/.cursor/mcp.json)
+    Cursor,
+    /// Windsurf (~/.codeium/windsurf/mcp_config.json)
+    Windsurf,
+}
+
+/// Everything `vinted search` accepts; shared by `vinted save`/`diff` and the
+/// MCP tools — saved searches persist (and reload) this exact set of flags.
+#[derive(Args, Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SearchArgs {
     /// Free-text search query.
     query: Option<String>,
 
@@ -256,7 +308,7 @@ impl From<ConditionArg> for Condition {
 }
 
 #[derive(ValueEnum, Clone, Debug, Serialize, Deserialize)]
-enum OrderArg {
+pub(crate) enum OrderArg {
     Relevance,
     NewestFirst,
     PriceLowToHigh,
@@ -285,7 +337,7 @@ async fn main() {
 
 /// Snapshot of an item as stored in watch state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ItemSnap {
+pub(crate) struct ItemSnap {
     title: String,
     #[serde(default)]
     price: Option<String>,
@@ -314,7 +366,7 @@ struct WatchState {
     last_run: u64,
 }
 
-fn snap(item: &Item) -> ItemSnap {
+pub(crate) fn snap(item: &Item) -> ItemSnap {
     let price = item
         .total_item_price
         .as_ref()
@@ -328,7 +380,7 @@ fn snap(item: &Item) -> ItemSnap {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -459,6 +511,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Command::Mcp { mcp_command } => match mcp_command {
+            McpCommand::Serve => {
+                mcp_server::serve(&cli.site, cli.currency.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            McpCommand::Install {
+                client,
+                all,
+                dry_run,
+            } => {
+                let report =
+                    mcp_install::install(client, *all, *dry_run).map_err(|e| e.to_string())?;
+                println!("{report}");
+            }
+        },
+
         Command::User { id } => {
             let client = VintedClient::new(&cli.site, cli.currency.clone())?;
             let user = client.user(*id).await?;
@@ -489,9 +558,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 // search pipeline (shared by `search` and `diff`)
 
-struct Run {
-    enriched: EnrichedSearch,
-    pages_fetched: u32,
+pub(crate) struct Run {
+    pub(crate) enriched: EnrichedSearch,
+    pub(crate) pages_fetched: u32,
 }
 
 /// Turn parsed flags into a server-side [`SearchFilter`].
@@ -601,7 +670,7 @@ fn split_comma(opt: &Option<String>) -> Vec<String> {
 /// Fetch + filter: server search, local text filters, seller-quality filters
 /// and (optionally) the with-description check. Cheap local filters run
 /// before the expensive per-item/page ones.
-async fn execute_search(
+pub(crate) async fn execute_search(
     client: &VintedClient,
     args: &SearchArgs,
 ) -> Result<Run, Box<dyn std::error::Error>> {
@@ -682,13 +751,24 @@ async fn execute_search(
 // ---------------------------------------------------------------------------
 // diff
 
-async fn diff(
-    cli: &Cli,
+/// One watch-diff run's delta (shared by `vinted diff` and the MCP
+/// `watch_diff` tool; printing and CSV export are the caller's job).
+pub(crate) struct DiffOut {
+    pub(crate) added: Vec<(i64, ItemSnap)>,
+    pub(crate) sold_removed: Vec<(i64, ItemSnap)>,
+    pub(crate) unchanged: usize,
+    /// Set on the first run: a baseline was recorded with this many items.
+    pub(crate) baseline: Option<usize>,
+    pub(crate) pages_fetched: u32,
+}
+
+/// Execute the saved search `args`, compare against the watch state named
+/// `name`, update the state, and return the delta.
+pub(crate) async fn run_diff(
     name: &str,
     client: &VintedClient,
     args: &SearchArgs,
-    export: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<DiffOut, Box<dyn std::error::Error>> {
     let run = execute_search(client, args).await?;
     let current: Vec<(i64, ItemSnap)> = run
         .enriched
@@ -710,21 +790,13 @@ async fn diff(
             last_run: now,
         };
         storage::save_state(name, &serde_json::to_string_pretty(&new_state)?)?;
-        if cli.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "baseline_recorded": true,
-                    "items": current.len(),
-                }))?
-            );
-        } else {
-            println!(
-                "Baseline recorded: {} items seen. Run `vinted diff {name}` again to see added and sold/removed items.",
-                current.len()
-            );
-        }
-        return Ok(());
+        return Ok(DiffOut {
+            added: Vec::new(),
+            sold_removed: Vec::new(),
+            unchanged: 0,
+            baseline: Some(current.len()),
+            pages_fetched: run.pages_fetched,
+        });
     };
 
     let current_ids: HashSet<i64> = current.iter().map(|(id, _)| *id).collect();
@@ -760,7 +832,40 @@ async fn diff(
     storage::save_state(name, &serde_json::to_string_pretty(&state)?)?;
 
     let unchanged = current.len().saturating_sub(added.len());
-    if cli.json {
+
+    Ok(DiffOut {
+        added,
+        sold_removed: removed,
+        unchanged,
+        baseline: None,
+        pages_fetched: run.pages_fetched,
+    })
+}
+
+async fn diff(
+    cli: &Cli,
+    name: &str,
+    client: &VintedClient,
+    args: &SearchArgs,
+    export: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out = run_diff(name, client, args).await?;
+
+    if let Some(baseline) = out.baseline {
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "baseline_recorded": true,
+                    "items": baseline,
+                }))?
+            );
+        } else {
+            println!(
+                "Baseline recorded: {baseline} items seen. Run `vinted diff {name}` again to see added and sold/removed items."
+            );
+        }
+    } else if cli.json {
         let entries = |list: &[(i64, ItemSnap)]| {
             list.iter()
                 .map(|(id, s)| {
@@ -777,47 +882,48 @@ async fn diff(
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "added": entries(&added),
-                "sold_removed": entries(&removed),
-                "unchanged": unchanged,
+                "added": entries(&out.added),
+                "sold_removed": entries(&out.sold_removed),
+                "unchanged": out.unchanged,
             }))?
         );
+    } else if out.added.is_empty() && out.sold_removed.is_empty() {
+        println!(
+            "No changes since the last run ({} items unchanged).",
+            out.unchanged
+        );
     } else {
-        if added.is_empty() && removed.is_empty() {
-            println!("No changes since the last run ({unchanged} items unchanged).");
-        } else {
-            if !added.is_empty() {
-                println!("+ added ({}):", added.len());
-                for (id, item) in &added {
-                    println!(
-                        "  [{id}] {} — {} — {}",
-                        truncate(&item.title, 60),
-                        item.price.as_deref().unwrap_or("—"),
-                        item.seller.as_deref().unwrap_or("—")
-                    );
-                }
+        if !out.added.is_empty() {
+            println!("+ added ({}):", out.added.len());
+            for (id, item) in &out.added {
+                println!(
+                    "  [{id}] {} — {} — {}",
+                    truncate(&item.title, 60),
+                    item.price.as_deref().unwrap_or("—"),
+                    item.seller.as_deref().unwrap_or("—")
+                );
             }
-            if !removed.is_empty() {
-                println!("- sold/removed ({}):", removed.len());
-                for (id, item) in &removed {
-                    println!(
-                        "  [{id}] {} — {} — {}",
-                        truncate(&item.title, 60),
-                        item.price.as_deref().unwrap_or("—"),
-                        item.seller.as_deref().unwrap_or("—")
-                    );
-                }
-            }
-            println!("{unchanged} items unchanged");
         }
+        if !out.sold_removed.is_empty() {
+            println!("- sold/removed ({}):", out.sold_removed.len());
+            for (id, item) in &out.sold_removed {
+                println!(
+                    "  [{id}] {} — {} — {}",
+                    truncate(&item.title, 60),
+                    item.price.as_deref().unwrap_or("—"),
+                    item.seller.as_deref().unwrap_or("—")
+                );
+            }
+        }
+        println!("{} items unchanged", out.unchanged);
     }
 
     if let Some(path) = export {
-        export_csv(&path, &added, &removed)?;
+        export_csv(&path, &out.added, &out.sold_removed)?;
         eprintln!("→ wrote diff to {}", path.display());
     }
-    if run.pages_fetched > 1 {
-        eprintln!("(checked {} page(s))", run.pages_fetched);
+    if out.pages_fetched > 1 {
+        eprintln!("(checked {} page(s))", out.pages_fetched);
     }
     Ok(())
 }
@@ -953,7 +1059,9 @@ fn print_search_table(enriched: &EnrichedSearch, pages_fetched: u32) {
     }
 }
 
-fn print_search_json(enriched: &EnrichedSearch) {
+/// Machine-readable view of one search run (shared by `vinted search --json`
+/// and the MCP `search_listings` tool).
+pub(crate) fn search_json_value(enriched: &EnrichedSearch) -> serde_json::Value {
     let items: Vec<serde_json::Value> = enriched
         .response
         .items
@@ -973,14 +1081,17 @@ fn print_search_json(enriched: &EnrichedSearch) {
         })
         .collect();
     let pagination = serde_json::to_value(&enriched.response.pagination).unwrap_or(json!({}));
+    json!({
+        "items": items,
+        "pagination": pagination,
+        "filter_dropped": enriched.dropped,
+    })
+}
+
+fn print_search_json(enriched: &EnrichedSearch) {
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({
-            "items": items,
-            "pagination": pagination,
-            "filter_dropped": enriched.dropped,
-        }))
-        .unwrap()
+        serde_json::to_string_pretty(&search_json_value(enriched)).unwrap()
     );
 }
 

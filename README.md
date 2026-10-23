@@ -101,6 +101,28 @@ Notes:
 - `--from-url` can also be saved; `vinted diff` re-uses everything stored with
   the search, same marketplace included.
 
+### MCP server (`vinted mcp`)
+
+The CLI doubles as a **Model Context Protocol server** so agent harnesses
+(Claude Code, Codex, Goose, Freebuff, Cursor, Windsurf — anything that speaks
+MCP stdio) can use Vinted natively:
+
+```console
+$ vinted mcp install                      # registers with every harness it detects
+$ vinted mcp install --client codex       # or --client claude/goose/freebuff/cursor/windsurf
+$ vinted mcp install --all --dry-run      # preview what would be written, change nothing
+$ vinted mcp serve                        # usually launched by the harness, not by hand
+```
+
+Exposed tools — `search_listings`, `item_details`, `seller_profile`,
+`list_watches`, `watch_diff`, `watch_save` — reuse the identical search
+pipeline **and the same saved-search files** as the CLI: save a watch at the
+terminal with `vinted save`, then ask your agent to `watch_diff` it later (or
+do it the other way around). The search tool schema deliberately advertises
+only the filters Vinted's endpoint actually honors (text query, price range,
+ordering, pagination, `exclude-text`/`titles-only`, seller quality) so agents
+never learn to send the id-facet filters that are silently ignored upstream.
+
 ### Categories & brands
 
 Numeric facet filters (`--catalog-ids`, `--brand-ids`, etc.) are passed to the
