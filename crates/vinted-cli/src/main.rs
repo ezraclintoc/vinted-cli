@@ -184,6 +184,14 @@ struct SearchArgs {
     #[arg(long)]
     with_description: bool,
 
+    /// Ignore matches found only in seller descriptions. Vinted's text search
+    /// matches titles AND descriptions server-side (descriptions are included
+    /// by default); this drops items whose title alone doesn't contain the
+    /// query.
+    #[arg(long)]
+    #[serde(default)]
+    titles_only: bool,
+
     /// Build the filter from a pasted Vinted search URL instead of hunting
     /// for catalog/brand/size/colour ids: filters tapped in the browser are
     /// reflected in the URL and parsed from there. Explicit flags override
@@ -534,16 +542,20 @@ fn build_filter(args: &SearchArgs) -> Result<SearchFilter, String> {
 }
 
 fn local_filter(args: &SearchArgs) -> LocalFilter {
+    // require_words keeps only items whose title contains every query word:
+    // baseline behavior for --case-sensitive, and the whole point of
+    // --titles-only (which strips description-only matches).
+    let require_words = if args.case_sensitive || args.titles_only {
+        args.query
+            .as_ref()
+            .map(|q| q.split_whitespace().map(|w| w.to_string()).collect())
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
     LocalFilter {
         exclude_text: split_comma(&args.exclude_text),
-        require_words: if args.case_sensitive {
-            args.query
-                .as_ref()
-                .map(|q| q.split_whitespace().map(|w| w.to_string()).collect())
-                .unwrap_or_default()
-        } else {
-            Default::default()
-        },
+        require_words,
         case: if args.case_sensitive {
             vinted_core::CaseMode::Exact
         } else {
@@ -970,4 +982,50 @@ fn print_search_json(enriched: &EnrichedSearch) {
         }))
         .unwrap()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn search_args(argv: &[&str]) -> SearchArgs {
+        let mut full = vec!["vinted", "search", "barley used"];
+        full.extend_from_slice(argv);
+        match Cli::parse_from(full).command {
+            Command::Search { args } => args,
+            _ => panic!("expected search subcommand"),
+        }
+    }
+
+    #[test]
+    fn titles_only_keeps_only_title_matches() {
+        let lf = local_filter(&search_args(&["--titles-only"]));
+        assert_eq!(lf.require_words, vec!["barley", "used"]);
+        // Case-insensitive by default, same as the server.
+        assert_eq!(lf.case, vinted_core::CaseMode::IgnoreCase);
+    }
+
+    #[test]
+    fn default_includes_description_matches() {
+        let lf = local_filter(&search_args(&[]));
+        assert!(lf.require_words.is_empty());
+    }
+
+    #[test]
+    fn saved_search_roundtrip_keeps_titles_only() {
+        let args = search_args(&["--titles-only", "--limit", "5"]);
+        let saved = serde_json::to_string(&args).unwrap();
+        let back: SearchArgs = serde_json::from_str(&saved).unwrap();
+        assert!(back.titles_only, "titles_only must survive a save/reload");
+        // Simulates an old saved-search file written before the flag existed.
+        let legacy = serde_json::from_str::<SearchArgs>(
+            &serde_json::to_string(&search_args(&[]))
+                .unwrap()
+                .replace("},\n\")titles_only\":false", "}")
+                .replace("\"titles_only\":false,", ""),
+        )
+        .expect("old files without titles_only must still load");
+        assert!(!legacy.titles_only);
+    }
 }

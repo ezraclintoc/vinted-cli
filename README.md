@@ -49,9 +49,11 @@ these are applied client-side on each result page:
 | `--exclude-text WORDS` | hide items whose title contains any term (comma separated) — case-insensitive by default |
 | `--case-sensitive` | enforce exact capitalization locally: query words must appear in titles with the exact case you typed, and `--exclude-text` matches exact case |
 | `--with-description` | only items that have a seller description. Search results carry no descriptions, so this fetches each item page afterwards — one request per item, noticeably slower |
+| `--titles-only` | ignore matches found only in seller descriptions. By default the query matches titles AND descriptions (Vinted's server search does both); this keeps only items whose title contains every query word |
 
-Titles are what the catalogue API exposes (descriptions are not part of search
-results).
+The text query itself runs server-side and matches **titles and descriptions**
+(nothing to enable — descriptions are included by default). Local filters above
+see what the API exposes, which is titles only.
 
 ### Custom seller-quality filters *(not available on Vinted)*
 
