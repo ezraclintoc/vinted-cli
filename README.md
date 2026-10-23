@@ -1,72 +1,146 @@
 # vinted-cli
 
 Search and filter [Vinted](https://www.vinted.com) — the second-hand fashion
-marketplace — from your terminal. Built in Rust on top of the unofficial
-marketplace API the web app itself uses.
+marketplace — from your terminal, or let your AI agent do it via MCP. Built in
+Rust on top of the unofficial marketplace API the web app itself uses.
+
+**Read-only by design:** this tool only *reads* Vinted. It cannot list items,
+reply to messages, favorite, buy, sell, or perform any other action on Vinted.
+There is nowhere to log in, because no login is ever performed.
 
 ```console
 $ vinted search "levi 550" --price-to 40 --order price-low-to-high --limit 6
-$ vinted search sneakers --min-seller-feedback 25 --min-seller-rating 0.95   # custom filter Vinted doesn't have
+$ vinted search sneakers --min-seller-feedback 25 --min-seller-rating 0.95   # a filter Vinted doesn't have
 $ vinted item 10464769572
-$ vinted user 3182616244
 ```
 
-## Why
+## Why it exists
 
-The eventual goal is an **MCP server** and a **better web front** on top of a
-solid, reusable core:
+Everything here is about **automating the search**: watching for new listings
+with saved searches, filtering on things Vinted's UI can't filter on (seller
+reputation, keyword blocklists, title-only matching), and letting agents poll
+the same watches through MCP. Read details and act manually at your own pace —
+or ask your agent to do the polling and report on changes.
 
+## Quick start
+
+Install from [crates.io](https://crates.io/crates/vinted-cli) (Rust 1.85+):
+
+```console
+$ cargo install vinted-cli
 ```
-crates/vinted-core   async client library (no UI opinion)
-crates/vinted-cli    terminal UI on top of the core
+
+or install a prebuilt binary:
+
+```console
+# Linux (x86_64, static musl build)
+$ curl -L https://github.com/ezraclintoc/vinted-cli/releases/latest/download/vinted-x86_64-unknown-linux-musl \
+    -o vinted && chmod +x vinted
+
+# macOS (Apple silicon)
+$ curl -L https://github.com/ezraclintoc/vinted-cli/releases/latest/download/vinted-aarch64-apple-darwin \
+    -o vinted && chmod +x vinted
 ```
 
-`--json` output on every command keeps the core script/agent-friendly out of
-the box.
+On Windows, grab `vinted-x86_64-pc-windows-msvc.exe` from
+[Releases](https://github.com/ezraclintoc/vinted-cli/releases) and rename it to
+`vinted.exe`. (The prebuilt binaries are self-contained; no Rust toolchain needed.)
 
-## Features
+Then, two minutes to your first result:
 
-### Native Vinted filters (`vinted search`)
+```console
+$ vinted search "levi 550" --price-to 40 --limit 6     # search your marketplace
+$ vinted item 10464769572                              # one item's detail page price summary
+$ vinted save levis "levi 550" --price-to 40           # save it as a watch (see below)
+```
+
+## AI agent (MCP)
+
+`vinted` is also a **[Model Context Protocol](https://modelcontextprotocol.io)
+server**: install it into your AI harness once and the agent gets six tools —
+`search_listings`, `item_details`, `seller_profile`, `list_watches`,
+`watch_diff`, `watch_save` — over the same search pipeline as the CLI,
+sharing the same saved-search files. Save a watch once, then let your agent
+do the staying-on-top-of-it for you.
+
+Real example — buying hard drives. Sellers almost never say whether a drive
+is CMR or SMR, but the model number (in the title, description or photos)
+tells. Rather than squinting at each listing yourself, let the agent do the
+scanning:
+
+```console
+# a typical listing, straight out of `vinted search "4tb hard drive"`:
+#   “WD 4TB internal hard drive, perfect condition” — CMR? SMR? it doesn't say.
+# hand the scanning to the agent instead:
+> “search Vinted for 4 TB hard drives under 40 and classify every drive as
+   CMR or SMR from its model number — cheapest CMRs first”
+→ CMR: ST4000DM000 — 35 USD, WD4001FAEX — 40 USD …
+→ SMR: ST4000DM004 — 30 USD (skip)
+```
+
+The agent can also poll a saved watch every evening and only surface actual
+changes — no more manually refreshing the search. Buying still happens
+manually in the browser: every MCP tool is read-only, same as the CLI.
+
+### Supported harnesses
+
+One command per harness — the installer writes the config file for you
+(upserting one `vinted` entry, preserving everything else):
+
+| Harness | Easy install | Where the entry lands (also fine to enter manually) |
+| --- | --- | --- |
+| Claude Code | `vinted mcp install --client claude` | `~/.claude.json` → `mcpServers.vinted` |
+| Codex | `vinted mcp install --client codex` | `~/.codex/config.toml` → `[mcp_servers.vinted]` |
+| Goose | `vinted mcp install --client goose` | `config.yaml` → `extensions.vinted` |
+| [Freebuff](https://freebuff.com/?ref=ref-541424d3-0a42-4b24-b893-c71e84be7395) | `vinted mcp install --client freebuff` | `.agents/mcp.json` → `mcpServers.vinted` |
+| Cursor | `vinted mcp install --client cursor` | `mcp.json` → `mcpServers.vinted` |
+| Windsurf | `vinted mcp install --client windsurf` | `mcp.json` → `mcpServers.vinted` |
+
+`vinted mcp install` with no flags registers every harness it detects,
+`--all` forces all six, and `--dry-run` previews without writing; re-runs
+are idempotent ("already installed, no changes"). Note there is **no IP or
+port to enter anywhere**: harness support is stdio-based — the harness
+launches `vinted mcp serve` itself locally. A manual entry is always
+possible: command = `vinted`, args = `["mcp", "serve"]`.
+
+*The Freebuff link above is a referral link: a small credit goes to the
+author if you sign up, at no cost to you.*
+
+**Your harness isn't in the table?**
+[Open an issue](https://github.com/ezraclintoc/vinted-cli/issues) — support
+is one config-file writer away for anything that speaks MCP over stdio.
+
+## How to use
+
+All commands take the global options `--site <tld>` (marketplace: `com`
+default, `fr`, `de`, `es`, `co.uk`, …), `--currency CODE`, and `--json`
+(machine-readable output, one stable shape per command).
+
+### Search
+
+```console
+$ vinted search sneakers --price-from 20 --price-to 60 \
+    --order newest-first --limit 30 --pages 2
+```
 
 | Flag | Meaning |
 | --- | --- |
-| `QUERY` (positional) | free-text search |
+| `QUERY` (positional) | free-text search — matches titles **and** seller descriptions server-side |
 | `--price-from F`, `--price-to F` | price range (site currency) |
-| `--catalog-ids`, `--brand-ids`, `--size-ids`, `--color-ids` | numeric ids (grab them from a vinted.com search URL) — repeatable, comma separated |
-| `--from-url URL` | build the whole filter from a pasted Vinted search URL (whatever filters you tapped in the browser are encoded in the URL); explicit flags override what the URL sets |
-| `--condition` | `new-with-tag`, `new-no-tag`, `very-good`, `good`, `satisfactory` |
 | `--order` | `relevance`, `newest-first`, `price-low-to-high`, `price-high-to-low` |
 | `--page N`, `--limit N` (max 100) | pagination |
-| `--pages N` | fetch N consecutive pages and merge the results (de-duplicated, polite 400 ms pauses) |
+| `--pages N` | fetch N consecutive pages, merged (polite pauses between) |
+| `--from-url URL` | build the whole filter from a pasted Vinted search URL; explicit flags override what the URL sets |
 
-### Local text filters
+**Local text filters** (applied client-side, since the server search has no
+keyword blocklist): `--exclude-text WORDS` (blocklist), `--case-sensitive`
+(exact capitalization required), `--titles-only` (drop matches found only in
+descriptions), `--with-description` (only items that carry a description;
+fetches one page per item, slower).
 
-Vinted's server search is case-insensitive and has no keyword blocklist, so
-these are applied client-side on each result page:
-
-| Flag | Meaning |
-| --- | --- |
-| `--exclude-text WORDS` | hide items whose title contains any term (comma separated) — case-insensitive by default |
-| `--case-sensitive` | enforce exact capitalization locally: query words must appear in titles with the exact case you typed, and `--exclude-text` matches exact case |
-| `--with-description` | only items that have a seller description. Search results carry no descriptions, so this fetches each item page afterwards — one request per item, noticeably slower |
-| `--titles-only` | ignore matches found only in seller descriptions. By default the query matches titles AND descriptions (Vinted's server search does both); this keeps only items whose title contains every query word |
-
-The text query itself runs server-side and matches **titles and descriptions**
-(nothing to enable — descriptions are included by default). Local filters above
-see what the API exposes, which is titles only.
-
-### Custom seller-quality filters *(not available on Vinted)*
-
-| Flag | Meaning |
-| --- | --- |
-| `--seller-has-reviews` | only items from sellers with ≥ 1 review |
-| `--min-seller-feedback N` | only sellers with at least N feedback |
-| `--min-seller-rating F` | only sellers with reputation ≥ F, 0..=1 (e.g. `0.95`) |
-| `--business-only` / `--amateur-only` | professional shops / private sellers |
-| `--exclude-seller LOGINS`, `--exclude-seller-id IDS` | block-list sellers |
-
-Seller profiles are fetched with bounded concurrency and cached across items in
-the same search.
+**Seller-quality filters** *(not available on Vinted's site)*:
+`--seller-has-reviews`, `--min-seller-feedback N`, `--min-seller-rating 0.95`,
+`--business-only` / `--amateur-only`, `--exclude-seller LOGINS`.
 
 ### Saved searches & diff
 
@@ -76,127 +150,74 @@ directory (`$XDG_CONFIG_HOME/vinted-cli` by default):
 ```console
 $ vinted save carhartt carhartt --price-to 60 --exclude-text kids --limit 40
 saved search `carhartt` — run it and diff with: vinted diff carhartt
-$ vinted searches                 # list saved searches
 $ vinted diff carhartt            # first run records a baseline
-Baseline recorded: 30 items seen. Run again to see added and sold/removed items.
 $ vinted diff carhartt            # after a while: what changed
 + added (2):
   [10479508510] Boys size 5 … carhartt — 3.85 USD — jennyzeltner
 - sold/removed (1):
   [10479468392] Baby Carhartt Vest — 8.05 USD — nscott605
 28 items unchanged
-$ vinted diff carhartt --export /tmp/diff.csv   # also write added+sold rows to CSV
-$ vinted diff carhartt --pages 3                # deeper scan (slower, catches more)
-$ vinted forget carhartt                        # remove it + its state
+$ vinted searches                 # list saved searches
+$ vinted forget carhartt          # remove it + its state
 ```
 
-Notes:
+“Sold/removed” means the item stopped appearing in the results — sold,
+delisted, or pushed out of the result window between runs. Use
+`diff --pages N` for deeper coverage and `--export FILE.csv` to get rows out.
 
-- “sold/removed” means the item stopped appearing in the search results —
-  it was sold, delisted, or pushed out of the (possibly filtered) result window
-  between runs. Run `diff --pages` with a deeper page count for more reliable
-  coverage.
-- Items are always compared on the same saved flags, and “removed” items stay
-  visible in later runs (they accumulate in the ledger; `forget` clears it).
-- `--from-url` can also be saved; `vinted diff` re-uses everything stored with
-  the search, same marketplace included.
+### AI agents (MCP)
 
-### MCP server (`vinted mcp`)
-
-The CLI doubles as a **Model Context Protocol server** so agent harnesses
-(Claude Code, Codex, Goose, Freebuff, Cursor, Windsurf — anything that speaks
-MCP stdio) can use Vinted natively:
-
-```console
-$ vinted mcp install                      # registers with every harness it detects
-$ vinted mcp install --client codex       # or --client claude/goose/freebuff/cursor/windsurf
-$ vinted mcp install --all --dry-run      # preview what would be written, change nothing
-$ vinted mcp serve                        # usually launched by the harness, not by hand
-```
-
-Exposed tools — `search_listings`, `item_details`, `seller_profile`,
-`list_watches`, `watch_diff`, `watch_save` — reuse the identical search
-pipeline **and the same saved-search files** as the CLI: save a watch at the
-terminal with `vinted save`, then ask your agent to `watch_diff` it later (or
-do it the other way around). The search tool schema deliberately advertises
-only the filters Vinted's endpoint actually honors (text query, price range,
-ordering, pagination, `exclude-text`/`titles-only`, seller quality) so agents
-never learn to send the id-facet filters that are silently ignored upstream.
-
-### Categories & brands
-
-Numeric facet filters (`--catalog-ids`, `--brand-ids`, etc.) are passed to the
-API exactly like the web front sends them, and exact names cannot be resolved
-anonymously (the brand/catalog typeahead endpoints are bot-blocked). Paste a
-search URL instead: `--from-url "https://www.vinted.com/items?brand_ids[]=…"`
-provides the same ids directly from the web UI.
-
-**Known upstream limitation (October 2026):** the anonymous catalogue endpoint
-we can use honour the text query, price range, order, currency and
-pagination — but it *silently ignores* id-based facet filters (brand,
-category, size, colour, condition) in every request shape we probed
-(comma-joined ids, repeated arrays, slugs, even a POST body). The behaviour is
-pinned by a manual (`#[ignore]`-gated) probe test in the repo, so if Vinted
-changes the endpoint, the drift shows up. Until then treat the id-facet flags
-as best-effort and lean on free-text queries plus the filters that do work
-(price range, order, `--exclude-text`, seller quality, `--with-description`):
-`vinted search "dell laptop"` self-identifies the brand well enough for
-discovery purposes.
+The CLI doubles as an MCP server your AI agent can drive these same
+searches through — see [AI agent (MCP)](#ai-agent-mcp).
 
 ### Other commands
 
 - `vinted item <ID>` — full item data (title, description, price, size,
-  condition, colour, material, photo) parsed from the public item page
+  condition, colour, material, photo)
 - `vinted user <ID>` — review counts and reputation for a seller
 
-### Global options
+## Caveats
 
-- `--site <tld>` — pick your marketplace: `com` (default), `fr`, `de`, `it`,
-  `es`, `co.uk`, `at`, `be`, `cz`, `dk`, `ee`, `fi`, `gr`, `hr`, `hu`, `ie`,
-  `lt`, `lu`, `nl`, `pl`, `pt`, `ro`, `se`, `si`, `sk`
-- `--currency CODE` — force currency (USD, EUR, GBP, PLN, CZK, HUF, …)
-- `--json` — machine-readable output for scripts / MCP tooling
+**Id-facet filters are dead upstream (October 2026).** The anonymous
+catalogue endpoint honors the text query, price range, order, currency and
+pagination, but *silently ignores* id-based facet filters (`--brand-ids`,
+`--catalog-ids`, sizes, colours, conditions) in every request shape we probed.
+The behaviour is pinned by an on-demand probe test in the repo. Until it
+changes, put brand/category words in the text query
+(`vinted search "adidas hoodie"`) and use the filters that do work.
+`--from-url` still encodes those ids for you — they're inert today.
 
-## Installation
+**Be polite.** Vinted has no official public API, this tool uses no account,
+and every request goes through the same anonymous session the web app gets
+(`access_token_web` cookie). It makes a handful of requests per search, does
+not rotate proxies, and retries nothing beyond session refresh. Heavy
+automated hammering may get your IP rate-challenged or permanently blocked —
+respect Vinted's Terms of Service.
 
-- From source: `cargo install --path crates/vinted-cli` (Rust 1.85+)
-- Or `cargo install vinted-cli` once published on crates.io
-- Prebuilt binaries from [GitHub Releases](https://github.com/ezraclintoc/vinted-cli/releases)
+## Legal notice
 
-## How it works (and its limits)
-
-Vinted has **no official public API**, and this tool uses **no account** of
-yours. It reuses the endpoints the web app calls with an **anonymous session**:
-no login, no purchase/sale/messaging actions, read-only discovery only.
-
-1. One landing-page request issues an `access_token_web` cookie + `X-Anon-Id`.
-2. Catalogue search goes through `api.<site>/svc-catalogue/items`.
-3. Seller profiles (for the review filters) live on `www.<site>/api/v2/users/:id`.
-4. Item details come from the public item page (the JSON detail endpoint is
-   bot-blocked); item pages are themselves sometimes geo-blocked, so we fall
-   back through a couple of country domains.
-
-Consequently:
-
-- Infrequent breaks are expected when Vinted changes things.
-- Be polite: this CLI does a handful of requests per search, no retries on
-  rate limits beyond session refresh, and no proxy rotation. Heavy automated
-  use may get your IP challenged; respect Vinted's terms of service.
-- No sign-in, so no buying/selling/messaging — read-only discovery only.
+This is an **open-source community project, not affiliated with,
+endorsed by, or sponsored by Vinted** in any way. "Vinted" is a trademark of
+its owner and both names belong to them. Source here is provided as-is, without
+warranty of any kind, and use of this tool is subject to Vinted's Terms of
+Service for accessing their service. If Vinted asks this project to stop, the
+project will comply. Keep your usage polite and read-only, and it should never
+come to that.
 
 ## Roadmap
 
-- [ ] MCP server (`vinted-mcp`) exposing `search` / `item` / `user` / `diff` tools, with a one-command install into Claude Code via `claude mcp add vinted -- vinted-mcp`
-- [ ] More custom filters: price-vs-brand outlier detection, review-text mining (“last N reviews all positive”)
-- [ ] Web front on top of `vinted-core`
+- [x] Saved searches with added/sold diff, CSV export, ledger (`v0.2.0`)
+- [x] MCP server + one-command install into agent harnesses (`v0.2.0`)
+- [ ] Watch notifications: webhook/e-mail report when a saved search changes
+- [ ] More seller-intelligence filters: price-vs-brand outliers, review-text mining (“last 20 reviews mention scams”)
+- [ ] Web frontend on top of `vinted-core`
+- [ ] Homebrew formula / winget package
 
 ## Contributing
 
-Suggestions and bug reports are welcome: if something breaks or you want a
-feature, please [open an issue](https://github.com/ezraclintoc/vinted-cli/issues)
-or submit a pull request.
+Suggestions and bug reports are welcome: open an
+[issue](https://github.com/ezraclintoc/vinted-cli/issues) or submit a PR.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-Not affiliated with, endorsed by, or sponsored by Vinted.
